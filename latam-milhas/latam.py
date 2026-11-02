@@ -105,7 +105,10 @@ def _preco(obj) -> tuple[float | None, str, float | None]:
 
 def parse_ofertas(payload: dict, origem: str, destino: str, dia: date) -> list[Voo]:
     voos: list[Voo] = []
-    itens = payload.get("content") or payload.get("data") or []
+    if isinstance(payload, list):
+        itens = payload
+    else:
+        itens = payload.get("content") or payload.get("data") or []
     if isinstance(itens, dict):
         itens = itens.get("content") or itens.get("offers") or []
     for item in itens:
@@ -151,6 +154,22 @@ def parse_ofertas(payload: dict, origem: str, destino: str, dia: date) -> list[V
             if valor is not None:
                 voos.append(Voo(**base, tarifa="menor", milhas=valor, moeda=moeda, taxas=taxas))
     return voos
+
+
+def resumo_estrutura(obj, limite: int = 1200) -> str:
+    """Mostra o formato de um JSON de forma compacta: chaves e o 1º item de listas."""
+    def podar(o, prof=0):
+        if prof > 6:
+            return "…"
+        if isinstance(o, dict):
+            return {k: podar(v, prof + 1) for k, v in list(o.items())[:25]}
+        if isinstance(o, list):
+            return [f"<lista com {len(o)} itens; 1º:>", podar(o[0], prof + 1)] if o else []
+        if isinstance(o, str) and len(o) > 40:
+            return o[:40] + "…"
+        return o
+    txt = json.dumps(podar(obj), ensure_ascii=False, separators=(",", ":"))
+    return txt[:limite] + ("…" if len(txt) > limite else "")
 
 
 # --------------------------------------------------------------- browser ---
@@ -207,23 +226,28 @@ class LatamBuscador:
         tag = f"{origem}-{destino}-{dia.isoformat()}-{cabine}"
         log.info("Buscando %s", tag)
         capturado: dict = {}
+        jsons: dict[str, object] = {}   # todas as respostas JSON da API interna (/bff/)
         trafego: list[tuple[int, str, str]] = []
 
         def on_resp(r):
             try:
                 if r.request.resource_type not in ("xhr", "fetch"):
                     return
-                ctype = (r.headers or {}).get("content-type", "")
                 trafego.append((r.status, r.request.method, r.url))
-                if "json" in capturado:
+                if "/bff/" not in r.url:
                     return
-                if SEARCH_API_HINT in r.url or ("offers" in r.url.lower() and "json" in ctype):
-                    capturado["status"] = r.status
+                nome = r.url.split("?")[0].split("/bff/")[-1].replace("/", "_")
+                if r.status in (401, 403, 429) and SEARCH_API_HINT in r.url:
+                    capturado["bloqueio"] = r.status
+                    return
+                try:
+                    dados = r.json()
+                except Exception:  # noqa: BLE001
+                    return
+                jsons[nome] = dados
+                if SEARCH_API_HINT in r.url:
+                    capturado["json"] = dados
                     capturado["url"] = r.url
-                    try:
-                        capturado["json"] = r.json()
-                    except Exception as e:  # noqa: BLE001
-                        capturado["erro"] = str(e)
             except Exception:  # noqa: BLE001
                 pass
 
@@ -234,29 +258,30 @@ class LatamBuscador:
                 self._debug(f"{tag}-403")
                 raise Bloqueado(f"Página de busca respondeu 403 ({tag})")
             fim = time.time() + self.timeout_ms / 1000
-            while "json" not in capturado and "erro" not in capturado and time.time() < fim:
+            while "json" not in capturado and "bloqueio" not in capturado and time.time() < fim:
                 if "auth.latamairlines.com" in self.page.url or "/login" in self.page.url:
                     raise PrecisaLogin("A LATAM pediu login. Rode:  .venv/bin/python monitor.py --login")
                 self.page.wait_for_timeout(500)
+            self.page.wait_for_timeout(1500)  # deixa chegar respostas paralelas (ex.: calendário)
         finally:
             self.page.remove_listener("response", on_resp)
 
-        if capturado.get("status") in (401, 403, 429):
-            self._debug(f"{tag}-api{capturado['status']}")
-            self._diagnostico(tag, trafego)
-            raise Bloqueado(f"API de busca respondeu {capturado['status']} ({tag})")
+        self.ultimas_respostas = jsons
+        for nome, dados in jsons.items():
+            (DEBUG_DIR / f"{tag}-{nome}.json").write_text(json.dumps(dados, ensure_ascii=False, indent=1))
+
+        if "bloqueio" in capturado:
+            self._debug(f"{tag}-api{capturado['bloqueio']}")
+            raise Bloqueado(f"API de busca respondeu {capturado['bloqueio']} ({tag})")
         if "json" not in capturado:
             self._debug(f"{tag}-semresposta")
-            log.warning("Não capturei a resposta da API para %s (veja data/debug)", tag)
+            log.warning("Não capturei a busca de voos para %s (respostas salvas em data/debug)", tag)
             self._diagnostico(tag, trafego)
             return []
-        log.info("API capturada: %s %s", capturado.get("status"), capturado.get("url", "")[:160])
+        log.info("Busca capturada: %s", capturado.get("url", "")[:160])
 
-        payload = capturado["json"]
-        voos = parse_ofertas(payload, origem, destino, dia)
+        voos = parse_ofertas(capturado["json"], origem, destino, dia)
         if not voos:
-            # Pode ser dia sem disponibilidade OU formato que mudou: guarda o JSON para análise.
-            (DEBUG_DIR / f"{tag}.json").write_text(json.dumps(payload, ensure_ascii=False, indent=1))
             log.info("Nenhum voo extraído para %s (JSON salvo em data/debug)", tag)
         return voos
 

@@ -185,6 +185,10 @@ def main():
         except (PrecisaLogin, Bloqueado) as e:
             print(f"\n>>> {type(e).__name__}: {e}")
             return
+        from latam import resumo_estrutura
+        for nome, dados in (getattr(b, "ultimas_respostas", None) or {}).items():
+            print(f"\n### {nome}\n{resumo_estrutura(dados)}")
+        print()
         for v in sorted(voos, key=lambda v: v.milhas):
             print(f"{v.voo:<14} {v.partida[11:16]:>5} {v.paradas}p {v.tarifa:<14} {v.milhas:>10,.0f} {v.moeda} taxas={v.taxas}")
         print(f"{len(voos)} tarifas")
