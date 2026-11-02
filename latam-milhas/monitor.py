@@ -382,8 +382,8 @@ def comparar(cfg: dict, o: str, d: str, inicio: date, n_datas: int, dias_viagem:
     def f(v):
         return _mil(v) if v is not None else "—"
     print()
-    print(f"{'datas':<15} | {'IDA E VOLTA (busca RT)':^29} | {'SÓ IDA (cada trecho)':^29} | diferença")
-    print(f"{'':<15} | {'ida':>9} {'volta':>9} {'total':>9} | {'ida':>9} {'volta':>9} {'total':>9} |")
+    print(f"{'datas':<13} | {'IDA E VOLTA (busca RT)':^29} | {'SÓ IDA (cada trecho)':^29} | diferença")
+    print(f"{'':<13} | {'ida':>9} {'volta':>9} {'total':>9} | {'ida':>9} {'volta':>9} {'total':>9} |")
     for x, y, rt, oi, ov, st in linhas:
         rti, rtv = rt if rt else (None, None)
         rtt = rti + rtv if rt else None
