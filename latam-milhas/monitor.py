@@ -142,6 +142,10 @@ def _filtrar(voos: list[Voo], cabine: str, max_paradas) -> list[Voo]:
     return ok
 
 
+def _mil(x: float) -> str:
+    return f"{x:,.0f}".replace(",", ".")
+
+
 def _cabine_url(cabine: str) -> str:
     return "Business" if cabine == "executiva" else "Economy"
 
@@ -156,30 +160,50 @@ def varrer_viagem(b: LatamBuscador, con, cfg: dict, vg: dict, pausa) -> int:
     idas = [ini + timedelta(days=i) for i in range((fim - ini).days + 1)]
     voltas = sorted({x + timedelta(days=n) for x in idas for n in duracoes})
     adultos = int(cfg.get("adultos", 1))
-    log.info("[%s] %d datas de ida e %d de volta para buscar", nome, len(idas), len(voltas))
-
-    melhor_ida: dict[date, Voo] = {}
-    melhor_volta: dict[date, Voo] = {}
-    for sentido, datas, de, para, alvo in (("ida", idas, o, d, melhor_ida), ("volta", voltas, d, o, melhor_volta)):
-        for dia in datas:
-            pausa()
-            voos = b.buscar(de, para, dia, _cabine_url(cabine), adultos)
-            salvar(con, voos)
-            bons = _filtrar(voos, cabine, vg.get("max_paradas"))
-            if bons:
-                alvo[dia] = min(bons, key=lambda v: v.milhas)
-                log.info("  %s %s: menor %s pts (%s, %s)", sentido, dia, f"{alvo[dia].milhas:,.0f}",
-                         alvo[dia].voo, alvo[dia].tarifa)
-            else:
-                log.info("  %s %s: nada disponível com os filtros", sentido, dia)
+    log.info("[%s] %d datas de ida, %s dias de viagem", nome, len(idas), "/".join(map(str, duracoes)))
 
     pares = []
-    for x in idas:
-        for n in duracoes:
-            y = x + timedelta(days=n)
-            if x in melhor_ida and y in melhor_volta:
-                vi, vv = melhor_ida[x], melhor_volta[y]
-                pares.append((vi.milhas + vv.milhas, (vi.taxas or 0) + (vv.taxas or 0), vi, vv, n))
+    filtro = lambda vs: _filtrar(vs, cabine, vg.get("max_paradas"))  # noqa: E731
+    if str(vg.get("modo", "ida_e_volta")) == "ida_e_volta":
+        # Uma busca de IDA E VOLTA por par de datas (como no site)
+        for x in idas:
+            for n in duracoes:
+                y = x + timedelta(days=n)
+                pausa()
+                lista_i, lista_v, info = b.buscar_ida_volta(o, d, x, y, _cabine_url(cabine), adultos, filtro=filtro)
+                salvar(con, lista_i + lista_v)
+                vi = info.get("ida_escolhida")
+                bons_v = filtro(lista_v)
+                if vi and bons_v:
+                    vv = min(bons_v, key=lambda v: v.milhas)
+                    pares.append((vi.milhas + vv.milhas, (vi.taxas or 0) + (vv.taxas or 0), vi, vv, n))
+                    log.info("  %s → %s: ida %s + volta %s = %s pts", x, y, _mil(vi.milhas), _mil(vv.milhas),
+                             _mil(vi.milhas + vv.milhas))
+                else:
+                    log.info("  %s → %s: nada disponível com os filtros", x, y)
+    else:
+        # Modo antigo: cada trecho como só ida, depois combina
+        melhor_ida: dict[date, Voo] = {}
+        melhor_volta: dict[date, Voo] = {}
+        for sentido, datas, de, para, alvo in (("ida", idas, o, d, melhor_ida),
+                                               ("volta", voltas, d, o, melhor_volta)):
+            for dia in datas:
+                pausa()
+                voos = b.buscar(de, para, dia, _cabine_url(cabine), adultos)
+                salvar(con, voos)
+                bons = filtro(voos)
+                if bons:
+                    alvo[dia] = min(bons, key=lambda v: v.milhas)
+                    log.info("  %s %s: menor %s pts (%s, %s)", sentido, dia, _mil(alvo[dia].milhas),
+                             alvo[dia].voo, alvo[dia].tarifa)
+                else:
+                    log.info("  %s %s: nada disponível com os filtros", sentido, dia)
+        for x in idas:
+            for n in duracoes:
+                y = x + timedelta(days=n)
+                if x in melhor_ida and y in melhor_volta:
+                    vi, vv = melhor_ida[x], melhor_volta[y]
+                    pares.append((vi.milhas + vv.milhas, (vi.taxas or 0) + (vv.taxas or 0), vi, vv, n))
     pares.sort(key=lambda p: p[0])
 
     log.info("[%s] %d combinações ida+volta encontradas", nome, len(pares))
@@ -207,10 +231,6 @@ def varrer_viagem(b: LatamBuscador, con, cfg: dict, vg: dict, pausa) -> int:
             linhas.append(f"• {_br(vi.data)} → {_br(vv.data)}: <b>{_mil(tot)}</b> pts + R$ {tx:.0f}")
         telegram(cfg, "\n".join(linhas))
     return alertas
-
-
-def _mil(x: float) -> str:
-    return f"{x:,.0f}".replace(",", ".")
 
 
 def _br(iso: str) -> str:

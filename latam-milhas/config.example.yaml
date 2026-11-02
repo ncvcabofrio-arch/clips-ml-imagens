@@ -1,14 +1,15 @@
 # Copie para config.yaml e ajuste:  cp config.example.yaml config.yaml
 
-# Viagens de ida e volta. O robô busca cada dia de ida e cada dia de volta
-# (só ida, separadamente) e combina os pares com a duração pedida.
+# Viagens de ida e volta. Para cada dia de ida, o robô faz uma busca de
+# IDA E VOLTA (como no site) com a volta X dias depois.
 viagens:
   - nome: Rio → Orlando
     origem: GIG
     destino: MCO
     ida_de: 2027-01-15         # primeiro dia possível de ida
-    ida_ate: 2027-03-04        # último dia de ida (volta até 15/03 com 11 dias)
-    dias_de_viagem: [9, 10, 11] # aceita 1 dia a mais ou a menos se ficar mais barato
+    ida_ate: 2027-03-05        # último dia de ida (volta até 15/03)
+    dias_de_viagem: [10]       # ex.: [9, 10, 11] testa 3x mais buscas
+    modo: ida_e_volta          # ida_e_volta (busca RT) | separado (cada trecho como só ida)
     cabine: economica          # economica | executiva | qualquer
     max_paradas: 1             # 0 = só voo direto
     max_milhas_total: 280000   # alerta quando IDA + VOLTA (por pessoa) for <= isso
