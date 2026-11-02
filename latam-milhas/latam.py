@@ -39,6 +39,8 @@ class Voo:
     milhas: float
     moeda: str
     taxas: float | None
+    cabine: str = "economica"
+    assentos: int | None = None
 
     def chave(self) -> str:
         return f"{self.origem}-{self.destino}-{self.data}-{self.voo}-{self.tarifa}"
@@ -103,7 +105,38 @@ def _preco(obj) -> tuple[float | None, str, float | None]:
     return valor, moeda, taxas
 
 
-def parse_ofertas(payload: dict, origem: str, destino: str, dia: date) -> list[Voo]:
+def _achar(obj, chaves, prof=0):
+    """Procura recursivamente o primeiro valor de uma das chaves."""
+    if prof > 4:
+        return None
+    if isinstance(obj, dict):
+        for k in chaves:
+            if obj.get(k) not in (None, ""):
+                return obj[k]
+        for v in obj.values():
+            r = _achar(v, chaves, prof + 1)
+            if r not in (None, ""):
+                return r
+    return None
+
+
+def _codigo_segmento(seg: dict) -> str:
+    cod = _achar(seg, ("flightCode",))
+    if cod:
+        return str(cod)
+    num = _achar(seg, ("flightNumber", "number"))
+    cia = _achar(seg, ("airlineCode", "marketingCarrier", "carrierCode", "operatingCarrier")) or ""
+    if isinstance(cia, dict):
+        cia = cia.get("code") or cia.get("iataCode") or ""
+    return f"{cia}{num}" if num else ""
+
+
+def eh_executiva(tarifa: str, cabine_label: str = "") -> bool:
+    t = f"{tarifa} {cabine_label}".upper()
+    return "BUSINESS" in t or "EXECUTIVA" in t or "PREMIUM" in t
+
+
+def parse_ofertas(payload, origem: str, destino: str, dia: date) -> list[Voo]:
     voos: list[Voo] = []
     if isinstance(payload, list):
         itens = payload
@@ -111,26 +144,24 @@ def parse_ofertas(payload: dict, origem: str, destino: str, dia: date) -> list[V
         itens = payload.get("content") or payload.get("data") or []
     if isinstance(itens, dict):
         itens = itens.get("content") or itens.get("offers") or []
+    vistos = set()
     for item in itens:
         if not isinstance(item, dict):
             continue
         s = item.get("summary") or item
         o = s.get("origin") or {}
         d = s.get("destination") or {}
-        codigo = s.get("flightCode") or ""
-        if not codigo and item.get("itinerary"):
-            codigo = "+".join(
-                str(seg.get("flightCode") or seg.get("flightNumber") or "")
-                for seg in item["itinerary"] if isinstance(seg, dict)
-            )
-        paradas = s.get("stopQuantity")
-        if paradas is None and isinstance(item.get("itinerary"), list):
-            paradas = max(len(item["itinerary"]) - 1, 0)
+        itin = item.get("itinerary") if isinstance(item.get("itinerary"), list) else []
+        segs = [c for c in (_codigo_segmento(seg) for seg in itin if isinstance(seg, dict)) if c]
+        codigo = "+".join(segs) or s.get("flightCode") or "?"
+        paradas = s.get("stopOvers", s.get("stopQuantity"))
+        if paradas is None:
+            paradas = max(len(itin) - 1, 0)
         base = dict(
             origem=o.get("iataCode") or origem,
             destino=d.get("iataCode") or destino,
             data=dia.isoformat(),
-            voo=codigo or "?",
+            voo=codigo,
             partida=str(o.get("departure") or o.get("departureTime") or ""),
             chegada=str(d.get("arrival") or d.get("arrivalTime") or ""),
             paradas=int(paradas or 0),
@@ -147,12 +178,27 @@ def parse_ofertas(payload: dict, origem: str, destino: str, dia: date) -> list[V
             nome = b.get("brandText") or b.get("name") or b.get("id") or ""
             if isinstance(nome, dict):
                 nome = nome.get("label") or nome.get("text") or ""
-            voos.append(Voo(**base, tarifa=str(nome), milhas=valor, moeda=moeda, taxas=taxas))
+            cab = b.get("cabin") or {}
+            cab_label = str(cab.get("label") or cab.get("id") or "") if isinstance(cab, dict) else str(cab)
+            assentos = None
+            sr = b.get("seatsRemaining")
+            if isinstance(sr, dict) and str(sr.get("count", "")).isdigit():
+                assentos = int(sr["count"])
+            chave = (base["partida"], codigo, str(nome), valor)
+            if chave in vistos:
+                continue
+            vistos.add(chave)
+            voos.append(Voo(**base, tarifa=str(nome), milhas=valor, moeda=moeda, taxas=taxas,
+                            cabine="executiva" if eh_executiva(str(nome), cab_label) else "economica",
+                            assentos=assentos))
             achou = True
         if not achou:
             valor, moeda, taxas = _preco(s.get("lowestPrice") and {"price": s["lowestPrice"]} or s)
-            if valor is not None:
-                voos.append(Voo(**base, tarifa="menor", milhas=valor, moeda=moeda, taxas=taxas))
+            chave = (base["partida"], codigo, "menor", valor)
+            if valor is not None and chave not in vistos:
+                vistos.add(chave)
+                voos.append(Voo(**base, tarifa=str(s.get("lowestBrandText") or "menor"), milhas=valor,
+                                moeda=moeda, taxas=taxas))
     return voos
 
 

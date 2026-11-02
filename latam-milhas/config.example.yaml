@@ -1,36 +1,39 @@
 # Copie para config.yaml e ajuste:  cp config.example.yaml config.yaml
 
-# Rotas monitoradas. Cada rota é buscada dia a dia entre data_inicio e data_fim (só ida).
-# Para ida e volta, crie duas rotas (ida e volta) separadas.
-rotas:
-  - origem: GIG
-    destino: LIS
-    data_inicio: 2027-03-01
-    data_fim: 2027-03-15
-    cabine: Economy        # Economy ou Business (Premium Business)
-    max_milhas: 60000      # alerta quando aparecer voo com preço <= isso
-    max_paradas: 1         # opcional: 0 = só voo direto
-  # - origem: GRU
-  #   destino: MIA
-  #   data_inicio: 2027-04-10
-  #   data_fim: 2027-04-20
-  #   cabine: Business
-  #   max_milhas: 150000
+# Viagens de ida e volta. O robô busca cada dia de ida e cada dia de volta
+# (só ida, separadamente) e combina os pares com a duração pedida.
+viagens:
+  - nome: Rio → Orlando
+    origem: GIG
+    destino: MCO
+    ida_de: 2027-01-15         # primeiro dia possível de ida
+    ida_ate: 2027-03-05        # último dia de ida (volta até 15/03 com 10 dias)
+    dias_de_viagem: [10]       # ex.: [9, 10, 11] para aceitar 1 dia a mais ou a menos
+    cabine: economica          # economica | executiva | qualquer
+    max_paradas: 1             # 0 = só voo direto
+    max_milhas_total: 280000   # alerta quando IDA + VOLTA (por pessoa) for <= isso
 
-# Passageiros
+# Rotas só de ida (opcional). Exemplo:
+# rotas:
+#   - origem: GRU
+#     destino: MIA
+#     data_inicio: 2027-04-10
+#     data_fim: 2027-04-20
+#     cabine: Economy
+#     max_milhas: 150000
+
 adultos: 1
 
 # Comportamento do robô (seja gentil para não ser bloqueado)
-espera_entre_buscas_seg: [25, 60]   # pausa aleatória entre uma data e outra
+espera_entre_buscas_seg: [20, 45]   # pausa aleatória entre buscas
 timeout_busca_seg: 60
-headless: false        # false + xvfb passa melhor pelo anti-bot. true = sem tela.
-# Proxy opcional (ex.: proxy residencial). Deixe vazio para usar o IP da VPS.
-proxy: ""              # ex.: "http://usuario:senha@host:porta"
+headless: false        # false = abre janela (Mac) / tela virtual xvfb (VPS)
+proxy: ""              # opcional: "http://usuario:senha@host:porta"
 
 # Alertas no Telegram (veja README para criar o bot)
 telegram:
   token: ""
   chat_id: ""
 
-# Re-alertar o mesmo voo só se o preço cair (true) ou nunca repetir (false)
-realertar_se_baixar: true
+resumo_telegram: true        # manda as 5 melhores combinações a cada varredura
+realertar_se_baixar: true    # avisa de novo o mesmo par se o preço cair

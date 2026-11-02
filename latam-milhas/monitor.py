@@ -127,25 +127,133 @@ def dias(rota: dict):
         d += timedelta(days=1)
 
 
+def _data(x) -> date:
+    return x if isinstance(x, date) else date.fromisoformat(str(x))
+
+
+def _filtrar(voos: list[Voo], cabine: str, max_paradas) -> list[Voo]:
+    ok = []
+    for v in voos:
+        if cabine in ("economica", "executiva") and v.cabine != cabine:
+            continue
+        if max_paradas is not None and v.paradas > int(max_paradas):
+            continue
+        ok.append(v)
+    return ok
+
+
+def _cabine_url(cabine: str) -> str:
+    return "Business" if cabine == "executiva" else "Economy"
+
+
+def varrer_viagem(b: LatamBuscador, con, cfg: dict, vg: dict, pausa) -> int:
+    """Ida e volta: busca cada dia de ida e de volta e combina os pares."""
+    nome = vg.get("nome") or f"{vg['origem']}-{vg['destino']}"
+    o, d = vg["origem"].upper(), vg["destino"].upper()
+    cabine = str(vg.get("cabine", "economica")).lower()
+    duracoes = [int(n) for n in (vg.get("dias_de_viagem") or [10])]
+    ini, fim = max(_data(vg["ida_de"]), date.today() + timedelta(days=1)), _data(vg["ida_ate"])
+    idas = [ini + timedelta(days=i) for i in range((fim - ini).days + 1)]
+    voltas = sorted({x + timedelta(days=n) for x in idas for n in duracoes})
+    adultos = int(cfg.get("adultos", 1))
+    log.info("[%s] %d datas de ida e %d de volta para buscar", nome, len(idas), len(voltas))
+
+    melhor_ida: dict[date, Voo] = {}
+    melhor_volta: dict[date, Voo] = {}
+    for sentido, datas, de, para, alvo in (("ida", idas, o, d, melhor_ida), ("volta", voltas, d, o, melhor_volta)):
+        for dia in datas:
+            pausa()
+            voos = b.buscar(de, para, dia, _cabine_url(cabine), adultos)
+            salvar(con, voos)
+            bons = _filtrar(voos, cabine, vg.get("max_paradas"))
+            if bons:
+                alvo[dia] = min(bons, key=lambda v: v.milhas)
+                log.info("  %s %s: menor %s pts (%s, %s)", sentido, dia, f"{alvo[dia].milhas:,.0f}",
+                         alvo[dia].voo, alvo[dia].tarifa)
+            else:
+                log.info("  %s %s: nada disponível com os filtros", sentido, dia)
+
+    pares = []
+    for x in idas:
+        for n in duracoes:
+            y = x + timedelta(days=n)
+            if x in melhor_ida and y in melhor_volta:
+                vi, vv = melhor_ida[x], melhor_volta[y]
+                pares.append((vi.milhas + vv.milhas, (vi.taxas or 0) + (vv.taxas or 0), vi, vv, n))
+    pares.sort(key=lambda p: p[0])
+
+    log.info("[%s] %d combinações ida+volta encontradas", nome, len(pares))
+    for tot, tx, vi, vv, n in pares[:10]:
+        log.info("   %s → %s (%dd): %s pts + R$ %.2f", vi.data, vv.data, n, f"{tot:,.0f}", tx)
+
+    limite = float(vg.get("max_milhas_total") or 0)
+    alertas = 0
+    for tot, tx, vi, vv, n in pares:
+        if limite and tot > limite:
+            break
+        chave = f"{nome}|{vi.data}|{vv.data}"
+        row = con.execute("SELECT milhas FROM alertas WHERE chave=?", (chave,)).fetchone()
+        if row is not None and not (cfg.get("realertar_se_baixar", True) and tot < row[0]):
+            continue
+        telegram(cfg, _msg_par(nome, tot, tx, vi, vv, n, cabine))
+        con.execute("INSERT OR REPLACE INTO alertas VALUES (?,?,?)",
+                    (chave, tot, datetime.now().isoformat(timespec="seconds")))
+        con.commit()
+        alertas += 1
+
+    if pares and cfg.get("resumo_telegram", True):
+        linhas = [f"📊 <b>{nome}</b> — 5 melhores ida+volta agora:"]
+        for tot, tx, vi, vv, n in pares[:5]:
+            linhas.append(f"• {_br(vi.data)} → {_br(vv.data)}: <b>{_mil(tot)}</b> pts + R$ {tx:.0f}")
+        telegram(cfg, "\n".join(linhas))
+    return alertas
+
+
+def _mil(x: float) -> str:
+    return f"{x:,.0f}".replace(",", ".")
+
+
+def _br(iso: str) -> str:
+    return f"{iso[8:10]}/{iso[5:7]}"
+
+
+def _msg_par(nome, tot, tx, vi: Voo, vv: Voo, n, cabine) -> str:
+    from latam import url_busca
+
+    def linha(v: Voo, rot):
+        p = "direto" if v.paradas == 0 else f"{v.paradas} parada(s)"
+        return (f"{rot} {_br(v.data)} {v.partida[11:16]} · {v.voo} · {p} · {v.tarifa} · "
+                f"{_mil(v.milhas)} pts + R$ {(v.taxas or 0):.0f}")
+    li = url_busca(vi.origem, vi.destino, date.fromisoformat(vi.data), _cabine_url(cabine), 1)
+    lv = url_busca(vv.origem, vv.destino, date.fromisoformat(vv.data), _cabine_url(cabine), 1)
+    return (f"✈️ <b>{nome}</b> — {n} dias\n"
+            f"<b>Total: {_mil(tot)} pts + R$ {tx:.0f}</b>\n"
+            f"{linha(vi, '🛫')}\n{linha(vv, '🛬')}\n"
+            f"<a href=\"{li}\">ver ida</a> · <a href=\"{lv}\">ver volta</a>")
+
+
 def varredura(cfg: dict):
     con = abrir_db()
-    espera = cfg.get("espera_entre_buscas_seg", [25, 60])
+    espera = cfg.get("espera_entre_buscas_seg", [20, 45])
     adultos = int(cfg.get("adultos", 1))
     total, alertas = 0, 0
+    estado = {"primeira": True}
+
+    def pausa():
+        if not estado["primeira"]:
+            time.sleep(random.uniform(*espera))
+        estado["primeira"] = False
+
     with LatamBuscador(headless=bool(cfg.get("headless", False)), proxy=cfg.get("proxy") or "",
                        timeout_seg=int(cfg.get("timeout_busca_seg", 60))) as b:
-        primeira = True
-        for rota in cfg["rotas"]:
+        for vg in cfg.get("viagens") or []:
+            alertas += varrer_viagem(b, con, cfg, vg, pausa)
+        for rota in cfg.get("rotas") or []:
             for dia in dias(rota):
-                if not primeira:
-                    time.sleep(random.uniform(*espera))
-                primeira = False
+                pausa()
                 voos = b.buscar(rota["origem"], rota["destino"], dia, rota.get("cabine", "Economy"), adultos)
                 total += len(voos)
                 salvar(con, voos)
-                if voos:
-                    menor = min(voos, key=lambda v: v.milhas)
-                    log.info("  %d tarifas, menor: %.0f %s (%s)", len(voos), menor.milhas, menor.moeda, menor.voo)
                 for v in voos:
                     if v.milhas > rota["max_milhas"]:
                         continue
@@ -155,7 +263,7 @@ def varredura(cfg: dict):
                         telegram(cfg, formatar(v, rota))
                         marcar_alertado(con, v)
                         alertas += 1
-    log.info("Fim: %d tarifas lidas, %d alertas enviados", total, alertas)
+    log.info("Fim da varredura: %d alertas enviados", alertas)
 
 
 def main():
@@ -185,13 +293,11 @@ def main():
         except (PrecisaLogin, Bloqueado) as e:
             print(f"\n>>> {type(e).__name__}: {e}")
             return
-        from latam import resumo_estrutura
-        for nome, dados in (getattr(b, "ultimas_respostas", None) or {}).items():
-            print(f"\n### {nome}\n{resumo_estrutura(dados)}")
-        print()
-        for v in sorted(voos, key=lambda v: v.milhas):
-            print(f"{v.voo:<14} {v.partida[11:16]:>5} {v.paradas}p {v.tarifa:<14} {v.milhas:>10,.0f} {v.moeda} taxas={v.taxas}")
-        print(f"{len(voos)} tarifas")
+        voos = sorted(voos, key=lambda v: v.milhas)
+        for v in voos[:20]:
+            print(f"{v.voo:<16} {v.partida[11:16]:>5} {v.paradas}p {v.cabine:<9} {v.tarifa:<22} "
+                  f"{_mil(v.milhas):>9} pts + R$ {(v.taxas or 0):.2f}  assentos={v.assentos}")
+        print(f"{len(voos)} tarifas (sem repetição); mostrando as 20 mais baratas")
         return
 
     # Evita duas execuções ao mesmo tempo (cron sobreposto)
