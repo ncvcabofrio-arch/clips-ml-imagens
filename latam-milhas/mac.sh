@@ -15,7 +15,7 @@ for f in README.md config.example.yaml latam.py monitor.py requirements.txt .git
 done
 [ -d .venv ] || python3 -m venv .venv
 .venv/bin/pip install -q --upgrade pip
-.venv/bin/pip install -q -r requirements.txt
+.venv/bin/pip install -q --upgrade -r requirements.txt
 .venv/bin/python -m playwright install chromium
 mkdir -p data
 [ -f config.yaml ] || cp config.example.yaml config.yaml
