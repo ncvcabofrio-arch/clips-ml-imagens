@@ -232,6 +232,51 @@ def _msg_par(nome, tot, tx, vi: Voo, vv: Voo, n, cabine) -> str:
             f"<a href=\"{li}\">ver ida</a> · <a href=\"{lv}\">ver volta</a>")
 
 
+def relatorio(cfg: dict, top: int = 15):
+    """Combina ida+volta usando os preços já salvos no banco (sem acessar a LATAM)."""
+    con = abrir_db()
+    for vg in cfg.get("viagens") or []:
+        nome = vg.get("nome") or f"{vg['origem']}-{vg['destino']}"
+        o, d = vg["origem"].upper(), vg["destino"].upper()
+        cabine = str(vg.get("cabine", "economica")).lower()
+        mp = vg.get("max_paradas")
+        duracoes = [int(n) for n in (vg.get("dias_de_viagem") or [10])]
+
+        def melhor_por_dia(de, para):
+            q = ("SELECT data, voo, tarifa, partida, paradas, milhas, taxas, ts FROM observacoes "
+                 "WHERE origem=? AND destino=? AND moeda='LOYALTY_POINTS'")
+            ult: dict[str, str] = {}
+            linhas = con.execute(q, (de, para)).fetchall()
+            for r in linhas:  # só a coleta mais recente de cada dia
+                ult[r[0]] = max(ult.get(r[0], ""), r[7])
+            best: dict[str, tuple] = {}
+            for data_, voo, tarifa, partida, paradas, milhas, taxas, ts in linhas:
+                if ts != ult[data_]:
+                    continue
+                exe = "BUSINESS" in tarifa.upper() or "PREMIUM" in tarifa.upper()
+                if cabine == "economica" and exe or cabine == "executiva" and not exe:
+                    continue
+                if mp is not None and paradas > int(mp):
+                    continue
+                if data_ not in best or milhas < best[data_][0]:
+                    best[data_] = (milhas, taxas or 0, voo, tarifa, partida)
+            return best
+
+        idas, voltas = melhor_por_dia(o, d), melhor_por_dia(d, o)
+        pares = []
+        for di, (mi, ti, vi, fi, pi) in idas.items():
+            for n in duracoes:
+                dv = (date.fromisoformat(di) + timedelta(days=n)).isoformat()
+                if dv in voltas:
+                    mv, tv, vv, fv, pv = voltas[dv]
+                    pares.append((mi + mv, ti + tv, di, dv, n, f"{vi} {pi[11:16]}", f"{vv} {pv[11:16]}"))
+        pares.sort()
+        print(f"\n=== {nome}: {len(idas)} dias de ida e {len(voltas)} de volta no banco; "
+              f"{len(pares)} combinações ({'/'.join(map(str, duracoes))} dias) ===")
+        for tot, tx, di, dv, n, a, b in pares[:top]:
+            print(f"  {_br(di)} → {_br(dv)} ({n:>2}d)  {_mil(tot):>9} pts + R$ {tx:>6.0f}   ida {a} | volta {b}")
+
+
 def varredura(cfg: dict):
     con = abrir_db()
     espera = cfg.get("espera_entre_buscas_seg", [20, 45])
@@ -272,6 +317,8 @@ def main():
     ap.add_argument("--testar-telegram", action="store_true")
     ap.add_argument("--teste-rt", nargs="+", metavar="ARG",
                     help="ORIGEM DESTINO AAAA-MM-DD(ida) AAAA-MM-DD(volta) [CABINE]")
+    ap.add_argument("--relatorio", action="store_true",
+                    help="mostra as melhores combinações com os preços já coletados (sem acessar a LATAM)")
     ap.add_argument("--login", action="store_true", help="abre o navegador para você fazer login na LATAM Pass")
     a = ap.parse_args()
     (RAIZ / "data").mkdir(exist_ok=True)
@@ -284,6 +331,10 @@ def main():
     if a.login:
         with LatamBuscador(headless=False, proxy=cfg.get("proxy") or "", timeout_seg=120) as b:
             b.login_manual()
+        return
+
+    if a.relatorio:
+        relatorio(cfg)
         return
 
     if a.teste_rt:
