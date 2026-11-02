@@ -270,6 +270,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--teste", nargs="+", metavar="ARG", help="ORIGEM DESTINO AAAA-MM-DD [CABINE]")
     ap.add_argument("--testar-telegram", action="store_true")
+    ap.add_argument("--teste-rt", nargs="+", metavar="ARG",
+                    help="ORIGEM DESTINO AAAA-MM-DD(ida) AAAA-MM-DD(volta) [CABINE]")
     ap.add_argument("--login", action="store_true", help="abre o navegador para você fazer login na LATAM Pass")
     a = ap.parse_args()
     (RAIZ / "data").mkdir(exist_ok=True)
@@ -282,6 +284,38 @@ def main():
     if a.login:
         with LatamBuscador(headless=False, proxy=cfg.get("proxy") or "", timeout_seg=120) as b:
             b.login_manual()
+        return
+
+    if a.teste_rt:
+        o, d, di, dv = a.teste_rt[:4]
+        cab = a.teste_rt[4] if len(a.teste_rt) > 4 else "Economy"
+        filtro = lambda vs: _filtrar(vs, "executiva" if cab == "Business" else "economica", None)  # noqa: E731
+
+        def mostra(titulo, vs):
+            print(f"\n== {titulo} ({len(vs)} tarifas) ==")
+            for v in sorted(vs, key=lambda v: v.milhas)[:8]:
+                print(f"  {v.voo:<16} {v.partida[11:16]:>5} {v.paradas}p {v.cabine:<9} {v.tarifa:<22} "
+                      f"{_mil(v.milhas):>9} pts + R$ {(v.taxas or 0):.2f}")
+        try:
+            with LatamBuscador(headless=bool(cfg.get("headless", False)), proxy=cfg.get("proxy") or "") as b:
+                idas, voltas, info = b.buscar_ida_volta(o.upper(), d.upper(), date.fromisoformat(di),
+                                                        date.fromisoformat(dv), cab, int(cfg.get("adultos", 1)),
+                                                        filtro=filtro)
+        except (PrecisaLogin, Bloqueado) as e:
+            print(f"\n>>> {type(e).__name__}: {e}")
+            return
+        print("URL idas :", info.get("url_idas"))
+        print("URL voltas:", info.get("url_voltas"), "status", info.get("status_voltas"))
+        mostra("IDAS (busca ida e volta)", idas)
+        esc = info.get("ida_escolhida")
+        if esc:
+            print(f"\nIda escolhida: {esc.voo} {esc.tarifa} {_mil(esc.milhas)} pts")
+        mostra("VOLTAS (depois de escolher a ida)", voltas)
+        vb = _filtrar(voltas, "executiva" if cab == "Business" else "economica", None)
+        if esc and vb:
+            m = min(vb, key=lambda v: v.milhas)
+            print(f"\nIda {_mil(esc.milhas)} + volta {_mil(m.milhas)} = {_mil(esc.milhas + m.milhas)} pts")
+            print("(confira no site se a volta mostra o preço só da volta ou o total)")
         return
 
     if a.teste:

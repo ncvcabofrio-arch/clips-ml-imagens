@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 import logging
+import random
+import re
 import time
 from dataclasses import dataclass, asdict
 from datetime import date
@@ -41,6 +43,7 @@ class Voo:
     taxas: float | None
     cabine: str = "economica"
     assentos: int | None = None
+    offer_id: str = ""
 
     def chave(self) -> str:
         return f"{self.origem}-{self.destino}-{self.data}-{self.voo}-{self.tarifa}"
@@ -57,16 +60,17 @@ class PrecisaLogin(Exception):
     """A LATAM redirecionou para a tela de login."""
 
 
-def url_busca(origem: str, destino: str, dia: date, cabine: str, adultos: int) -> str:
+def url_busca(origem: str, destino: str, dia: date, cabine: str, adultos: int,
+              volta: date | None = None) -> str:
     q = {
         "origin": origem,
         "outbound": f"{dia.isoformat()}T12:00:00.000Z",
         "destination": destino,
-        "inbound": "null",
+        "inbound": f"{volta.isoformat()}T12:00:00.000Z" if volta else "null",
         "adt": adultos,
         "chd": 0,
         "inf": 0,
-        "trip": "OW",
+        "trip": "RT" if volta else "OW",
         "cabin": cabine,
         "redemption": "true",
         "sort": "RECOMMENDED",
@@ -190,7 +194,7 @@ def parse_ofertas(payload, origem: str, destino: str, dia: date) -> list[Voo]:
             vistos.add(chave)
             voos.append(Voo(**base, tarifa=str(nome), milhas=valor, moeda=moeda, taxas=taxas,
                             cabine="executiva" if eh_executiva(str(nome), cab_label) else "economica",
-                            assentos=assentos))
+                            assentos=assentos, offer_id=str(b.get("offerId") or "")))
             achou = True
         if not achou:
             valor, moeda, taxas = _preco(s.get("lowestPrice") and {"price": s["lowestPrice"]} or s)
@@ -330,6 +334,89 @@ class LatamBuscador:
         if not voos:
             log.info("Nenhum voo extraído para %s (JSON salvo em data/debug)", tag)
         return voos
+
+    def buscar_ida_volta(self, origem: str, destino: str, ida: date, volta: date,
+                         cabine: str = "Economy", adultos: int = 1, filtro=None):
+        """Busca IDA E VOLTA como o site faz: carrega a busca RT (lista de idas),
+        escolhe a ida mais barata e pede as voltas com o offerId dela.
+        Retorna (voos_ida, voos_volta, info)."""
+        url = url_busca(origem, destino, ida, cabine, adultos, volta=volta)
+        tag = f"RT-{origem}-{destino}-{ida.isoformat()}-{volta.isoformat()}-{cabine}"
+        log.info("Buscando ida e volta %s", tag)
+        cap: dict = {}
+        buscas: list[str] = []
+
+        def on_resp(r):
+            try:
+                if SEARCH_API_HINT not in r.url:
+                    return
+                buscas.append(r.url)
+                if r.status in (401, 403, 429):
+                    cap["bloqueio"] = r.status
+                    return
+                if "json" not in cap:
+                    cap["json"] = r.json()
+                    cap["url"] = r.url
+                    cap["headers"] = r.request.all_headers()
+            except Exception:  # noqa: BLE001
+                pass
+
+        self.page.on("response", on_resp)
+        try:
+            resp = self.page.goto(url, timeout=self.timeout_ms, wait_until="domcontentloaded")
+            if resp and resp.status == 403:
+                self._debug(f"{tag}-403")
+                raise Bloqueado(f"Página de busca respondeu 403 ({tag})")
+            fim = time.time() + self.timeout_ms / 1000
+            while "json" not in cap and "bloqueio" not in cap and time.time() < fim:
+                if "auth.latamairlines.com" in self.page.url or "/login" in self.page.url:
+                    raise PrecisaLogin("A LATAM pediu login. Rode:  .venv/bin/python monitor.py --login")
+                self.page.wait_for_timeout(500)
+        finally:
+            self.page.remove_listener("response", on_resp)
+
+        info = {"url_idas": cap.get("url", ""), "buscas": buscas}
+        if "bloqueio" in cap:
+            raise Bloqueado(f"API de busca respondeu {cap['bloqueio']} ({tag})")
+        if "json" not in cap:
+            self._debug(f"{tag}-semresposta")
+            log.warning("Não capturei a busca de ida e volta %s", tag)
+            return [], [], info
+        (DEBUG_DIR / f"{tag}-idas.json").write_text(json.dumps(cap["json"], ensure_ascii=False, indent=1))
+        idas = parse_ofertas(cap["json"], origem, destino, ida)
+        candidatas = [v for v in (filtro(idas) if filtro else idas) if v.offer_id]
+        if not candidatas:
+            return idas, [], info
+
+        escolhida = min(candidatas, key=lambda v: v.milhas)
+        url_api = cap["url"]
+        if "outOfferId=" in url_api:
+            url_voltas = re.sub(r"outOfferId=[^&]*", f"outOfferId={escolhida.offer_id}", url_api)
+        else:
+            url_voltas = url_api + ("&" if "?" in url_api else "?") + f"outOfferId={escolhida.offer_id}"
+        info["url_voltas"] = url_voltas
+        info["ida_escolhida"] = escolhida
+        headers = {k: v for k, v in (cap.get("headers") or {}).items()
+                   if not k.startswith(":") and k.lower() not in ("cookie", "host", "content-length", "referer")}
+        self.page.wait_for_timeout(random.randint(2000, 4000))
+        res = self.page.evaluate(
+            """async ([u, h]) => {
+                 const r = await fetch(u, {headers: h, credentials: 'include'});
+                 let body = null; try { body = await r.json(); } catch (e) {}
+                 return {status: r.status, body};
+               }""",
+            [url_voltas, headers],
+        )
+        info["status_voltas"] = res.get("status")
+        if res.get("status") in (401, 403, 429):
+            raise Bloqueado(f"API de voltas respondeu {res.get('status')} ({tag})")
+        corpo = res.get("body")
+        if corpo is None:
+            log.warning("Resposta das voltas sem JSON (status %s)", res.get("status"))
+            return idas, [], info
+        (DEBUG_DIR / f"{tag}-voltas.json").write_text(json.dumps(corpo, ensure_ascii=False, indent=1))
+        voltas = parse_ofertas(corpo, destino, origem, volta)
+        return idas, voltas, info
 
     def login_manual(self):
         """Abre a LATAM e espera a pessoa fazer login à mão (senha + SMS).
