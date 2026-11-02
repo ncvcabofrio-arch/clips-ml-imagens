@@ -1,0 +1,36 @@
+# Copie para config.yaml e ajuste:  cp config.example.yaml config.yaml
+
+# Rotas monitoradas. Cada rota é buscada dia a dia entre data_inicio e data_fim (só ida).
+# Para ida e volta, crie duas rotas (ida e volta) separadas.
+rotas:
+  - origem: GIG
+    destino: LIS
+    data_inicio: 2027-03-01
+    data_fim: 2027-03-15
+    cabine: Economy        # Economy ou Business (Premium Business)
+    max_milhas: 60000      # alerta quando aparecer voo com preço <= isso
+    max_paradas: 1         # opcional: 0 = só voo direto
+  # - origem: GRU
+  #   destino: MIA
+  #   data_inicio: 2027-04-10
+  #   data_fim: 2027-04-20
+  #   cabine: Business
+  #   max_milhas: 150000
+
+# Passageiros
+adultos: 1
+
+# Comportamento do robô (seja gentil para não ser bloqueado)
+espera_entre_buscas_seg: [25, 60]   # pausa aleatória entre uma data e outra
+timeout_busca_seg: 60
+headless: false        # false + xvfb passa melhor pelo anti-bot. true = sem tela.
+# Proxy opcional (ex.: proxy residencial). Deixe vazio para usar o IP da VPS.
+proxy: ""              # ex.: "http://usuario:senha@host:porta"
+
+# Alertas no Telegram (veja README para criar o bot)
+telegram:
+  token: ""
+  chat_id: ""
+
+# Re-alertar o mesmo voo só se o preço cair (true) ou nunca repetir (false)
+realertar_se_baixar: true
