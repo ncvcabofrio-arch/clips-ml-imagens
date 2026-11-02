@@ -54,6 +54,11 @@ def abrir_db() -> sqlite3.Connection:
             partida TEXT, chegada TEXT, paradas INT, milhas REAL, moeda TEXT, taxas REAL
         );
         CREATE TABLE IF NOT EXISTS alertas (chave TEXT PRIMARY KEY, milhas REAL, ts TEXT);
+        CREATE TABLE IF NOT EXISTS ida_volta (
+            ts TEXT, origem TEXT, destino TEXT, ida TEXT, volta TEXT,
+            voo_ida TEXT, tarifa_ida TEXT, milhas_ida REAL, taxas_ida REAL,
+            voo_volta TEXT, tarifa_volta TEXT, milhas_volta REAL, taxas_volta REAL
+        );
         """
     )
     return con
@@ -67,6 +72,35 @@ def salvar(con, voos: list[Voo]):
           v.paradas, v.milhas, v.moeda, v.taxas) for v in voos],
     )
     con.commit()
+
+
+def salvar_rt(con, vi: Voo, vv: Voo):
+    con.execute("INSERT INTO ida_volta VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (datetime.now().isoformat(timespec="seconds"), vi.origem, vi.destino, vi.data, vv.data,
+                 vi.voo, vi.tarifa, vi.milhas, vi.taxas, vv.voo, vv.tarifa, vv.milhas, vv.taxas))
+    con.commit()
+
+
+def melhor_salvo(con, de: str, para: str, dia: str, cabine: str, max_paradas):
+    """Menor preço só-ida salvo no banco para um dia (coleta mais recente)."""
+    linhas = con.execute(
+        "SELECT ts, voo, tarifa, paradas, milhas, taxas FROM observacoes "
+        "WHERE origem=? AND destino=? AND data=? AND moeda='LOYALTY_POINTS'", (de, para, dia)).fetchall()
+    if not linhas:
+        return None
+    ult = max(r[0] for r in linhas)
+    best = None
+    for ts, voo, tarifa, paradas, milhas, taxas in linhas:
+        if ts != ult:
+            continue
+        exe = "BUSINESS" in tarifa.upper() or "PREMIUM" in tarifa.upper()
+        if (cabine == "economica" and exe) or (cabine == "executiva" and not exe):
+            continue
+        if max_paradas is not None and paradas > int(max_paradas):
+            continue
+        if best is None or milhas < best[0]:
+            best = (milhas, taxas or 0, voo, tarifa)
+    return best
 
 
 def deve_alertar(con, v: Voo, realertar_se_baixar: bool) -> bool:
@@ -171,11 +205,11 @@ def varrer_viagem(b: LatamBuscador, con, cfg: dict, vg: dict, pausa) -> int:
                 y = x + timedelta(days=n)
                 pausa()
                 lista_i, lista_v, info = b.buscar_ida_volta(o, d, x, y, _cabine_url(cabine), adultos, filtro=filtro)
-                salvar(con, lista_i + lista_v)
                 vi = info.get("ida_escolhida")
                 bons_v = filtro(lista_v)
                 if vi and bons_v:
                     vv = min(bons_v, key=lambda v: v.milhas)
+                    salvar_rt(con, vi, vv)
                     pares.append((vi.milhas + vv.milhas, (vi.taxas or 0) + (vv.taxas or 0), vi, vv, n))
                     log.info("  %s → %s: ida %s + volta %s = %s pts", x, y, _mil(vi.milhas), _mil(vv.milhas),
                              _mil(vi.milhas + vv.milhas))
@@ -297,6 +331,70 @@ def relatorio(cfg: dict, top: int = 15):
             print(f"  {_br(di)} → {_br(dv)} ({n:>2}d)  {_mil(tot):>9} pts + R$ {tx:>6.0f}   ida {a} | volta {b}")
 
 
+def comparar(cfg: dict, o: str, d: str, inicio: date, n_datas: int, dias_viagem: int):
+    """Para N datas: busca IDA E VOLTA e compara com a soma dos trechos SÓ IDA."""
+    vg = (cfg.get("viagens") or [{}])[0]
+    cabine = str(vg.get("cabine", "economica")).lower()
+    mp = vg.get("max_paradas", 1)
+    filtro = lambda vs: _filtrar(vs, cabine, mp)  # noqa: E731
+    adultos = int(cfg.get("adultos", 1))
+    espera = cfg.get("espera_entre_buscas_seg", [20, 45])
+    con = abrir_db()
+    linhas = []
+    primeira = [True]
+
+    def pausa():
+        if not primeira[0]:
+            time.sleep(random.uniform(*espera))
+        primeira[0] = False
+
+    def so_ida(b, de, para, dia):
+        r = melhor_salvo(con, de, para, dia.isoformat(), cabine, mp)
+        if r is None:
+            pausa()
+            voos = b.buscar(de, para, dia, _cabine_url(cabine), adultos)
+            salvar(con, voos)
+            bons = filtro(voos)
+            if bons:
+                m = min(bons, key=lambda v: v.milhas)
+                r = (m.milhas, m.taxas or 0, m.voo, m.tarifa)
+        return r
+
+    with LatamBuscador(headless=bool(cfg.get("headless", False)), proxy=cfg.get("proxy") or "",
+                       timeout_seg=int(cfg.get("timeout_busca_seg", 60))) as b:
+        for i in range(n_datas):
+            x = inicio + timedelta(days=i)
+            y = x + timedelta(days=dias_viagem)
+            pausa()
+            _, lv, info = b.buscar_ida_volta(o, d, x, y, _cabine_url(cabine), adultos, filtro=filtro)
+            vi = info.get("ida_escolhida")
+            bv = filtro(lv)
+            rt = None
+            if vi and bv:
+                vv = min(bv, key=lambda v: v.milhas)
+                salvar_rt(con, vi, vv)
+                rt = (vi.milhas, vv.milhas)
+            ow_i = so_ida(b, o, d, x)
+            ow_v = so_ida(b, d, o, y)
+            linhas.append((x, y, rt, ow_i, ow_v, info.get("status_voltas")))
+            log.info("  %s → %s  RT=%s  ida=%s  volta=%s", x, y, rt, ow_i and ow_i[0], ow_v and ow_v[0])
+
+    def f(v):
+        return _mil(v) if v is not None else "—"
+    print()
+    print(f"{'datas':<15} | {'IDA E VOLTA (busca RT)':^29} | {'SÓ IDA (cada trecho)':^29} | diferença")
+    print(f"{'':<15} | {'ida':>9} {'volta':>9} {'total':>9} | {'ida':>9} {'volta':>9} {'total':>9} |")
+    for x, y, rt, oi, ov, st in linhas:
+        rti, rtv = rt if rt else (None, None)
+        rtt = rti + rtv if rt else None
+        oii, ovv = (oi[0] if oi else None), (ov[0] if ov else None)
+        owt = oii + ovv if oi and ov else None
+        dif = f"{_mil(owt - rtt)} a menos no RT" if rtt and owt and owt > rtt else (
+            f"{_mil(rtt - owt)} a mais no RT" if rtt and owt and rtt > owt else ("igual" if rtt and owt else "—"))
+        print(f"{_br(x.isoformat())} → {_br(y.isoformat())} | {f(rti):>9} {f(rtv):>9} {f(rtt):>9} | "
+              f"{f(oii):>9} {f(ovv):>9} {f(owt):>9} | {dif}" + (f"  (status voltas {st})" if not rt else ""))
+
+
 def varredura(cfg: dict):
     con = abrir_db()
     espera = cfg.get("espera_entre_buscas_seg", [20, 45])
@@ -339,6 +437,8 @@ def main():
                     help="ORIGEM DESTINO AAAA-MM-DD(ida) AAAA-MM-DD(volta) [CABINE]")
     ap.add_argument("--relatorio", action="store_true",
                     help="mostra as melhores combinações com os preços já coletados (sem acessar a LATAM)")
+    ap.add_argument("--comparar", nargs="+", metavar="ARG",
+                    help="ORIGEM DESTINO AAAA-MM-DD N_DATAS [DIAS_VIAGEM]: compara ida-e-volta x só ida")
     ap.add_argument("--login", action="store_true", help="abre o navegador para você fazer login na LATAM Pass")
     a = ap.parse_args()
     (RAIZ / "data").mkdir(exist_ok=True)
@@ -351,6 +451,15 @@ def main():
     if a.login:
         with LatamBuscador(headless=False, proxy=cfg.get("proxy") or "", timeout_seg=120) as b:
             b.login_manual()
+        return
+
+    if a.comparar:
+        o, d, ini, n = a.comparar[:4]
+        dv = int(a.comparar[4]) if len(a.comparar) > 4 else 10
+        try:
+            comparar(cfg, o.upper(), d.upper(), date.fromisoformat(ini), int(n), dv)
+        except (PrecisaLogin, Bloqueado) as e:
+            print(f"\n>>> {type(e).__name__}: {e}")
         return
 
     if a.relatorio:
