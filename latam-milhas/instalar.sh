@@ -4,14 +4,15 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 export DEBIAN_FRONTEND=noninteractive
-sudo apt-get update
-sudo apt-get install -y python3 python3-venv python3-pip xvfb
+SUDO=""; [ "$(id -u)" -ne 0 ] && SUDO="sudo"
+$SUDO apt-get update
+$SUDO apt-get install -y python3 python3-venv python3-pip xvfb
 
 python3 -m venv .venv
 .venv/bin/pip install --upgrade pip
 .venv/bin/pip install -r requirements.txt
 # Baixa o Chromium e as bibliotecas de sistema que ele precisa
-sudo .venv/bin/python -m playwright install-deps chromium
+$SUDO .venv/bin/python -m playwright install-deps chromium
 .venv/bin/python -m playwright install chromium
 
 mkdir -p data
