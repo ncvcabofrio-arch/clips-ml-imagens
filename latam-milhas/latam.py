@@ -203,14 +203,25 @@ class LatamBuscador:
         tag = f"{origem}-{destino}-{dia.isoformat()}-{cabine}"
         log.info("Buscando %s", tag)
         capturado: dict = {}
+        trafego: list[tuple[int, str, str]] = []
 
         def on_resp(r):
-            if SEARCH_API_HINT in r.url and r.request.method in ("GET", "POST"):
-                capturado["status"] = r.status
-                try:
-                    capturado["json"] = r.json()
-                except Exception as e:  # noqa: BLE001
-                    capturado["erro"] = str(e)
+            try:
+                if r.request.resource_type not in ("xhr", "fetch"):
+                    return
+                ctype = (r.headers or {}).get("content-type", "")
+                trafego.append((r.status, r.request.method, r.url))
+                if "json" in capturado:
+                    return
+                if SEARCH_API_HINT in r.url or ("offers" in r.url.lower() and "json" in ctype):
+                    capturado["status"] = r.status
+                    capturado["url"] = r.url
+                    try:
+                        capturado["json"] = r.json()
+                    except Exception as e:  # noqa: BLE001
+                        capturado["erro"] = str(e)
+            except Exception:  # noqa: BLE001
+                pass
 
         self.page.on("response", on_resp)
         try:
@@ -226,11 +237,14 @@ class LatamBuscador:
 
         if capturado.get("status") in (401, 403, 429):
             self._debug(f"{tag}-api{capturado['status']}")
+            self._diagnostico(tag, trafego)
             raise Bloqueado(f"API de busca respondeu {capturado['status']} ({tag})")
         if "json" not in capturado:
             self._debug(f"{tag}-semresposta")
             log.warning("Não capturei a resposta da API para %s (veja data/debug)", tag)
+            self._diagnostico(tag, trafego)
             return []
+        log.info("API capturada: %s %s", capturado.get("status"), capturado.get("url", "")[:160])
 
         payload = capturado["json"]
         voos = parse_ofertas(payload, origem, destino, dia)
@@ -239,6 +253,23 @@ class LatamBuscador:
             (DEBUG_DIR / f"{tag}.json").write_text(json.dumps(payload, ensure_ascii=False, indent=1))
             log.info("Nenhum voo extraído para %s (JSON salvo em data/debug)", tag)
         return voos
+
+    def _diagnostico(self, tag: str, trafego: list):
+        """Escreve (e imprime) um resumo em texto do que a página carregou."""
+        linhas = [f"URL final: {self.page.url}"]
+        try:
+            linhas.append(f"Título: {self.page.title()}")
+            texto = self.page.inner_text("body", timeout=5000)
+            texto = " ".join(texto.split())[:700]
+            linhas.append(f"Texto da página: {texto}")
+        except Exception as e:  # noqa: BLE001
+            linhas.append(f"(não li o texto da página: {e})")
+        linhas.append(f"Chamadas XHR/fetch ({len(trafego)}):")
+        for st, metodo, u in trafego[-40:]:
+            linhas.append(f"  {st} {metodo} {u[:170]}")
+        rel = "\n".join(linhas)
+        (DEBUG_DIR / f"{tag}-diagnostico.txt").write_text(rel)
+        print("\n----- DIAGNÓSTICO -----\n" + rel + "\n-----------------------")
 
     def _debug(self, nome: str):
         try:
