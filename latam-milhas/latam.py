@@ -337,68 +337,123 @@ class LatamBuscador:
 
     def buscar_ida_volta(self, origem: str, destino: str, ida: date, volta: date,
                          cabine: str = "Economy", adultos: int = 1, filtro=None):
-        """Busca IDA E VOLTA como o site faz: carrega a busca RT (lista de idas),
-        escolhe a ida mais barata e pede as voltas com o offerId dela.
+        """Busca IDA E VOLTA como uma pessoa no site:
+        1) abre a busca com ida e volta (trip=RT);
+        2) clica no voo de ida mais barato e na tarifa;
+        3) captura a lista de voltas que o site carrega depois do clique.
+        Se o clique falhar, tenta pedir as voltas direto à API (plano B).
         Retorna (voos_ida, voos_volta, info)."""
         url = url_busca(origem, destino, ida, cabine, adultos, volta=volta)
         tag = f"RT-{origem}-{destino}-{ida.isoformat()}-{volta.isoformat()}-{cabine}"
         log.info("Buscando ida e volta %s", tag)
-        cap: dict = {}
-        buscas: list[str] = []
+        respostas: list[dict] = []
 
         def on_resp(r):
             try:
                 if SEARCH_API_HINT not in r.url:
                     return
-                buscas.append(r.url)
                 if r.status in (401, 403, 429):
-                    cap["bloqueio"] = r.status
+                    respostas.append({"bloqueio": r.status, "url": r.url})
                     return
-                if "json" not in cap:
-                    cap["json"] = r.json()
-                    cap["url"] = r.url
-                    cap["headers"] = r.request.all_headers()
+                respostas.append({"url": r.url, "json": r.json(), "headers": r.request.all_headers()})
             except Exception:  # noqa: BLE001
                 pass
 
+        def esperar(cond, seg):
+            fim = time.time() + seg
+            while not cond() and time.time() < fim:
+                if "auth.latamairlines.com" in self.page.url or "/login" in self.page.url:
+                    raise PrecisaLogin("A LATAM pediu login. Rode:  .venv/bin/python monitor.py --login")
+                self.page.wait_for_timeout(500)
+            return cond()
+
+        info: dict = {"metodo": None}
         self.page.on("response", on_resp)
         try:
             resp = self.page.goto(url, timeout=self.timeout_ms, wait_until="domcontentloaded")
             if resp and resp.status == 403:
                 self._debug(f"{tag}-403")
                 raise Bloqueado(f"Página de busca respondeu 403 ({tag})")
-            fim = time.time() + self.timeout_ms / 1000
-            while "json" not in cap and "bloqueio" not in cap and time.time() < fim:
-                if "auth.latamairlines.com" in self.page.url or "/login" in self.page.url:
-                    raise PrecisaLogin("A LATAM pediu login. Rode:  .venv/bin/python monitor.py --login")
-                self.page.wait_for_timeout(500)
+            esperar(lambda: len(respostas) >= 1, self.timeout_ms / 1000)
+            if not respostas:
+                self._debug(f"{tag}-semresposta")
+                log.warning("Não capturei a busca de ida e volta %s", tag)
+                return [], [], info
+            if "bloqueio" in respostas[0]:
+                raise Bloqueado(f"API de busca respondeu {respostas[0]['bloqueio']} ({tag})")
+
+            primeira = respostas[0]
+            info["url_idas"] = primeira["url"]
+            (DEBUG_DIR / f"{tag}-idas.json").write_text(json.dumps(primeira["json"], ensure_ascii=False, indent=1))
+            idas = parse_ofertas(primeira["json"], origem, destino, ida)
+            candidatas = [v for v in (filtro(idas) if filtro else idas) if v.offer_id]
+            if not candidatas:
+                return idas, [], info
+            escolhida = min(candidatas, key=lambda v: v.milhas)
+            info["ida_escolhida"] = escolhida
+
+            # ---- clique na ida, como uma pessoa ----
+            n_antes = len(respostas)
+            if self._clicar_ida(escolhida, tag):
+                if esperar(lambda: len(respostas) > n_antes, 25):
+                    info["metodo"] = "clique"
+            if info["metodo"] == "clique":
+                segunda = respostas[-1]
+                if "bloqueio" in segunda:
+                    raise Bloqueado(f"API de voltas respondeu {segunda['bloqueio']} ({tag})")
+                info["url_voltas"] = segunda["url"]
+                corpo = segunda["json"]
+            else:
+                # ---- plano B: pedir as voltas direto à API ----
+                corpo = self._voltas_via_api(primeira, escolhida, info, tag)
         finally:
             self.page.remove_listener("response", on_resp)
 
-        info = {"url_idas": cap.get("url", ""), "buscas": buscas}
-        if "bloqueio" in cap:
-            raise Bloqueado(f"API de busca respondeu {cap['bloqueio']} ({tag})")
-        if "json" not in cap:
-            self._debug(f"{tag}-semresposta")
-            log.warning("Não capturei a busca de ida e volta %s", tag)
-            return [], [], info
-        (DEBUG_DIR / f"{tag}-idas.json").write_text(json.dumps(cap["json"], ensure_ascii=False, indent=1))
-        idas = parse_ofertas(cap["json"], origem, destino, ida)
-        candidatas = [v for v in (filtro(idas) if filtro else idas) if v.offer_id]
-        if not candidatas:
+        if corpo is None:
             return idas, [], info
+        (DEBUG_DIR / f"{tag}-voltas.json").write_text(json.dumps(corpo, ensure_ascii=False, indent=1))
+        voltas = parse_ofertas(corpo, destino, origem, volta)
+        log.info("  voltas obtidas por: %s (%d tarifas)", info["metodo"], len(voltas))
+        return idas, voltas, info
 
-        escolhida = min(candidatas, key=lambda v: v.milhas)
-        url_api = cap["url"]
+    def _clicar_ida(self, v: "Voo", tag: str) -> bool:
+        """Clica no card do voo de ida pelo preço e depois no botão da tarifa."""
+        preco = f"{v.milhas:,.0f}".replace(",", ".")
+        hora = v.partida[11:16].lstrip("0") if len(v.partida) >= 16 else ""
+        try:
+            self.page.wait_for_timeout(random.randint(2500, 4000))
+            alvo = self.page.get_by_text(re.compile(re.escape(preco))).first
+            alvo.scroll_into_view_if_needed(timeout=5000)
+            alvo.click(timeout=8000)
+            self.page.wait_for_timeout(random.randint(2000, 3500))
+            self._debug(f"{tag}-clique1")
+            # painel de tarifas: botão de escolher a tarifa
+            botoes = self.page.locator("button").filter(
+                has_text=re.compile(r"escolher|selecionar|continuar|choose|select", re.I))
+            for i in range(min(botoes.count(), 6)):
+                bt = botoes.nth(i)
+                if bt.is_visible():
+                    bt.click(timeout=8000)
+                    log.info("  cliquei na ida %s %s (%s pts)", v.voo, hora, preco)
+                    self.page.wait_for_timeout(1500)
+                    self._debug(f"{tag}-clique2")
+                    return True
+            log.warning("  não achei o botão da tarifa depois de clicar na ida (veja %s-clique1.png)", tag)
+            return True  # às vezes o clique no card já avança para as voltas
+        except Exception as e:  # noqa: BLE001
+            log.warning("  não consegui clicar na ida: %s", str(e).splitlines()[0][:150])
+            self._debug(f"{tag}-clique-erro")
+            return False
+
+    def _voltas_via_api(self, primeira: dict, escolhida: "Voo", info: dict, tag: str):
+        url_api = primeira["url"]
         if "outOfferId=" in url_api:
             url_voltas = re.sub(r"outOfferId=[^&]*", f"outOfferId={escolhida.offer_id}", url_api)
         else:
             url_voltas = url_api + ("&" if "?" in url_api else "?") + f"outOfferId={escolhida.offer_id}"
         info["url_voltas"] = url_voltas
-        info["ida_escolhida"] = escolhida
-        headers = {k: v for k, v in (cap.get("headers") or {}).items()
+        headers = {k: v for k, v in (primeira.get("headers") or {}).items()
                    if not k.startswith(":") and k.lower() not in ("cookie", "host", "content-length", "referer")}
-        self.page.wait_for_timeout(random.randint(2000, 4000))
         res = self.page.evaluate(
             """async ([u, h]) => {
                  const r = await fetch(u, {headers: h, credentials: 'include'});
@@ -408,15 +463,12 @@ class LatamBuscador:
             [url_voltas, headers],
         )
         info["status_voltas"] = res.get("status")
+        info["metodo"] = "api"
         if res.get("status") in (401, 403, 429):
             raise Bloqueado(f"API de voltas respondeu {res.get('status')} ({tag})")
-        corpo = res.get("body")
-        if corpo is None:
+        if res.get("body") is None:
             log.warning("Resposta das voltas sem JSON (status %s)", res.get("status"))
-            return idas, [], info
-        (DEBUG_DIR / f"{tag}-voltas.json").write_text(json.dumps(corpo, ensure_ascii=False, indent=1))
-        voltas = parse_ofertas(corpo, destino, origem, volta)
-        return idas, voltas, info
+        return res.get("body")
 
     def login_manual(self):
         """Abre a LATAM e espera a pessoa fazer login à mão (senha + SMS).

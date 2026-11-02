@@ -486,6 +486,7 @@ def main():
             return
         print("URL idas :", info.get("url_idas"))
         print("URL voltas:", info.get("url_voltas"), "status", info.get("status_voltas"))
+        print("Voltas obtidas por:", info.get("metodo"), "(clique = como uma pessoa no site)")
         mostra("IDAS (busca ida e volta)", idas)
         esc = info.get("ida_escolhida")
         if esc:
