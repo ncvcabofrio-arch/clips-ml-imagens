@@ -51,6 +51,10 @@ class Bloqueado(Exception):
     """O anti-bot (Akamai) negou acesso."""
 
 
+class PrecisaLogin(Exception):
+    """A LATAM redirecionou para a tela de login."""
+
+
 def url_busca(origem: str, destino: str, dia: date, cabine: str, adultos: int) -> str:
     q = {
         "origin": origem,
@@ -231,6 +235,8 @@ class LatamBuscador:
                 raise Bloqueado(f"Página de busca respondeu 403 ({tag})")
             fim = time.time() + self.timeout_ms / 1000
             while "json" not in capturado and "erro" not in capturado and time.time() < fim:
+                if "auth.latamairlines.com" in self.page.url or "/login" in self.page.url:
+                    raise PrecisaLogin("A LATAM pediu login. Rode:  .venv/bin/python monitor.py --login")
                 self.page.wait_for_timeout(500)
         finally:
             self.page.remove_listener("response", on_resp)
@@ -253,6 +259,21 @@ class LatamBuscador:
             (DEBUG_DIR / f"{tag}.json").write_text(json.dumps(payload, ensure_ascii=False, indent=1))
             log.info("Nenhum voo extraído para %s (JSON salvo em data/debug)", tag)
         return voos
+
+    def login_manual(self):
+        """Abre a LATAM e espera a pessoa fazer login à mão (senha + SMS).
+        A sessão fica salva no perfil do navegador (data/browser-profile)."""
+        self.page.goto(f"{BASE}/br/pt", timeout=self.timeout_ms, wait_until="domcontentloaded")
+        print()
+        print("=" * 60)
+        print("Na janela do navegador que abriu:")
+        print("  1) clique em 'Entrar' / 'Fazer login' no topo do site")
+        print("  2) entre com seu e-mail/CPF, senha e o código SMS")
+        print("  3) quando aparecer seu nome logado, volte AQUI e aperte Enter")
+        print("Não tem pressa: a janela fica aberta até você apertar Enter.")
+        print("=" * 60)
+        input()
+        print("Sessão salva. URL atual:", self.page.url)
 
     def _diagnostico(self, tag: str, trafego: list):
         """Escreve (e imprime) um resumo em texto do que a página carregou."""

@@ -20,7 +20,7 @@ from pathlib import Path
 import requests
 import yaml
 
-from latam import Bloqueado, LatamBuscador, Voo
+from latam import Bloqueado, LatamBuscador, PrecisaLogin, Voo
 
 RAIZ = Path(__file__).parent
 DB = RAIZ / "data" / "milhas.db"
@@ -162,6 +162,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--teste", nargs="+", metavar="ARG", help="ORIGEM DESTINO AAAA-MM-DD [CABINE]")
     ap.add_argument("--testar-telegram", action="store_true")
+    ap.add_argument("--login", action="store_true", help="abre o navegador para você fazer login na LATAM Pass")
     a = ap.parse_args()
     (RAIZ / "data").mkdir(exist_ok=True)
     cfg = carregar_config()
@@ -170,11 +171,20 @@ def main():
         telegram(cfg, "✅ Monitor LATAM milhas conectado!")
         return
 
+    if a.login:
+        with LatamBuscador(headless=False, proxy=cfg.get("proxy") or "", timeout_seg=120) as b:
+            b.login_manual()
+        return
+
     if a.teste:
         o, d, dt = a.teste[:3]
         cab = a.teste[3] if len(a.teste) > 3 else "Economy"
-        with LatamBuscador(headless=bool(cfg.get("headless", False)), proxy=cfg.get("proxy") or "") as b:
-            voos = b.buscar(o.upper(), d.upper(), date.fromisoformat(dt), cab, int(cfg.get("adultos", 1)))
+        try:
+            with LatamBuscador(headless=bool(cfg.get("headless", False)), proxy=cfg.get("proxy") or "") as b:
+                voos = b.buscar(o.upper(), d.upper(), date.fromisoformat(dt), cab, int(cfg.get("adultos", 1)))
+        except (PrecisaLogin, Bloqueado) as e:
+            print(f"\n>>> {type(e).__name__}: {e}")
+            return
         for v in sorted(voos, key=lambda v: v.milhas):
             print(f"{v.voo:<14} {v.partida[11:16]:>5} {v.paradas}p {v.tarifa:<14} {v.milhas:>10,.0f} {v.moeda} taxas={v.taxas}")
         print(f"{len(voos)} tarifas")
@@ -191,6 +201,10 @@ def main():
         fd = LOCK.open("x")
     try:
         varredura(cfg)
+    except PrecisaLogin as e:
+        log.error("PRECISA LOGIN: %s", e)
+        telegram(cfg, "⚠️ Monitor LATAM: a sessão da LATAM Pass expirou. Faça login de novo (--login).")
+        sys.exit(3)
     except Bloqueado as e:
         log.error("BLOQUEADO: %s", e)
         telegram(cfg, f"⚠️ Monitor LATAM bloqueado pelo anti-bot: {e}\nVeja data/debug na VPS.")
