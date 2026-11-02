@@ -3,6 +3,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+export DEBIAN_FRONTEND=noninteractive
 sudo apt-get update
 sudo apt-get install -y python3 python3-venv python3-pip xvfb
 
