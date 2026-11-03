@@ -30,7 +30,7 @@ milhas_disponiveis: 585000
 passageiros: 4
 melhores_dias: [9, 10, 11]
 evitar_periodos:                    # viagens que encostem nesses dias são descartadas
-  - [2027-03-06, 2027-03-10]        # Carnaval 2027 (sábado a Quarta de Cinzas)
+  - [2027-02-05, 2027-02-10]        # Carnaval 2027 (sexta 05/02 a Quarta de Cinzas 10/02)
 folga_horas_rapido: 2               # "meio-termo": até 2h a mais que o voo mais rápido do dia
 
 # Comportamento do robô (seja gentil para não ser bloqueado)
