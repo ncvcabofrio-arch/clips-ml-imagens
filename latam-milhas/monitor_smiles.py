@@ -69,7 +69,8 @@ def main():
         mostrar("IDAS", idas)
         mostrar("VOLTAS", voltas)
         if not info.get("url"):
-            proprias = [t for t in info["trafego"] if "smiles" in t[2] or "voegol" in t[2]]
+            proprias = [t for t in info["trafego"] if ("smiles" in t[2] or "voegol" in t[2])
+                        and not any(x in t[2] for x in ("member", "plans", "cobranded", "voxus"))]
             print(f"\nChamadas da Smiles feitas pela página ({len(proprias)}):")
             for st, m, u in proprias[-40:]:
                 print(f"  {st} {m} {u[:160]}")

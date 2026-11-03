@@ -25,7 +25,10 @@ RAIZ = Path(__file__).parent
 DEBUG_DIR = RAIZ / "data" / "debug-smiles"
 PROFILE_DIR = RAIZ / "data" / "browser-profile-smiles-chrome"
 # trechos de URL que identificam a API de busca de voos da Smiles
-API_HINTS = ("flightsearch", "airlines/search", "/search?")
+API_HINTS = ("flightsearch", "airlines/search", "flight-search", "flights/search")
+# respostas que interessam para diagnóstico (nada de dados pessoais da conta)
+DIAG_HINTS = ("search", "flight", "availability", "fare", "segment")
+IGNORAR = ("voucher", "member", "plans", "cobranded", "cap-rate", "easy-travel", "users", "goals")
 
 
 def _ms(d: date) -> int:
@@ -261,10 +264,15 @@ class SmilesBuscador:
                     dados = r.json()
                 except Exception:  # noqa: BLE001
                     return
-                nome = r.url.split("?")[0].rstrip("/").split("/")[-2:]
-                jsons["_".join(nome)] = dados
-                if isinstance(dados, dict) and ("requestedFlightSegmentList" in dados or
-                                                any(h in r.url for h in API_HINTS)):
+                url_l = r.url.lower()
+                if any(i in url_l for i in IGNORAR):
+                    return
+                eh_busca = isinstance(dados, dict) and (
+                    "requestedFlightSegmentList" in dados or any(h in url_l for h in API_HINTS))
+                if eh_busca or any(h in url_l for h in DIAG_HINTS):
+                    nome = r.url.split("?")[0].rstrip("/").split("/")[-3:]
+                    jsons["_".join(nome)] = dados
+                if eh_busca:
                     busca["json"] = dados
                     busca["url"] = r.url
             except Exception:  # noqa: BLE001
@@ -281,6 +289,8 @@ class SmilesBuscador:
                 if "/login" in self.page.url or "login.smiles" in self.page.url:
                     raise PrecisaLogin("A Smiles pediu login. Rode:  .venv/bin/python monitor_smiles.py --login")
                 self.page.wait_for_timeout(500)
+            if "json" not in busca:
+                log.info("Smiles: a página não fez a busca de voos em %ds", self.timeout_ms // 1000)
             self.page.wait_for_timeout(random.randint(1500, 2500))
         finally:
             self.page.remove_listener("response", on_resp)
