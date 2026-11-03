@@ -1,0 +1,276 @@
+"""Busca de passagens com milhas na Smiles (GOL e parceiras).
+
+Mesma estratégia do latam.py: um Chromium de verdade abre a página de resultados
+da Smiles e o robô captura o JSON que o próprio site recebe da API de busca.
+Usa perfil de navegador e pasta de debug próprios, para rodar em paralelo com a LATAM.
+"""
+from __future__ import annotations
+
+import json
+import logging
+import random
+import time
+from datetime import date, datetime, timezone
+from pathlib import Path
+from urllib.parse import urlencode
+
+from playwright.sync_api import sync_playwright
+
+from latam import Voo, Bloqueado, PrecisaLogin, _achar, resumo_estrutura  # noqa: F401
+
+log = logging.getLogger("smiles")
+
+BASE = "https://www.smiles.com.br"
+RAIZ = Path(__file__).parent
+DEBUG_DIR = RAIZ / "data" / "debug-smiles"
+PROFILE_DIR = RAIZ / "data" / "browser-profile-smiles"
+# trechos de URL que identificam a API de busca de voos da Smiles
+API_HINTS = ("flightsearch", "airlines/search", "/search?")
+
+
+def _ms(d: date) -> int:
+    """Smiles usa a data como timestamp em milissegundos (meio-dia UTC)."""
+    return int(datetime(d.year, d.month, d.day, 12, tzinfo=timezone.utc).timestamp() * 1000)
+
+
+def url_busca(origem: str, destino: str, ida: date, volta: date | None, adultos: int = 1) -> str:
+    q = {
+        "adults": adultos,
+        "cabin": "ALL",
+        "children": 0,
+        "departureDate": _ms(ida),
+        "infants": 0,
+        "isElegible": "false",
+        "isFlexibleDateChecked": "false",
+        "searchType": "congenere",      # inclui companhias parceiras
+        "segments": 1,
+        "tripType": 1 if volta else 2,  # 1 = ida e volta, 2 = só ida
+        "originAirport": origem,
+        "originCity": "",
+        "originCountry": "",
+        "originAirportIsAny": "false",
+        "destinationAirport": destino,
+        "destinCity": "",
+        "destinCountry": "",
+        "destinAirportIsAny": "false",
+        "novo-resultado-voos": "true",
+    }
+    if volta:
+        q["returnDate"] = _ms(volta)
+    return f"{BASE}/mfe/emissao-passagem/?{urlencode(q)}"
+
+
+# ---------------------------------------------------------------- parser ---
+
+def _minutos(dur) -> int | None:
+    if isinstance(dur, (int, float)):
+        return int(dur)
+    if isinstance(dur, dict):
+        h, m = dur.get("hours"), dur.get("minutes")
+        if h is not None or m is not None:
+            return int(h or 0) * 60 + int(m or 0)
+    if isinstance(dur, str) and ":" in dur:
+        try:
+            h, m = dur.split(":")[:2]
+            return int(h) * 60 + int(m)
+        except ValueError:
+            return None
+    return None
+
+
+def _codigo_voo(f: dict) -> str:
+    pernas = f.get("legList") or f.get("legs") or []
+    cods = []
+    for p in pernas if isinstance(pernas, list) else []:
+        num = p.get("flightNumber") or _achar(p, ("flightNumber", "number"))
+        cia = p.get("marketingAirline") or p.get("operationAirline") or p.get("airline") or {}
+        cia = cia.get("code") if isinstance(cia, dict) else cia
+        if num:
+            cods.append(f"{cia or ''}{num}")
+    if cods:
+        return "+".join(cods)
+    num = f.get("flightNumber") or _achar(f, ("flightNumber",))
+    cia = f.get("airline") or {}
+    cia = cia.get("code") if isinstance(cia, dict) else cia
+    return f"{cia or ''}{num or '?'}"
+
+
+def _tarifas(f: dict) -> list[tuple[str, float, float | None]]:
+    """[(tipo, milhas, dinheiro)] — tolera nomes diferentes de campos."""
+    out = []
+    for fare in f.get("fareList") or f.get("fares") or []:
+        if not isinstance(fare, dict):
+            continue
+        milhas = fare.get("miles") or fare.get("milesAmount") or _achar(fare, ("miles",))
+        try:
+            milhas = float(milhas)
+        except (TypeError, ValueError):
+            continue
+        if milhas <= 0:
+            continue
+        dinheiro = fare.get("money") or fare.get("airlineFareAmount")
+        try:
+            dinheiro = float(dinheiro) if dinheiro is not None else None
+        except (TypeError, ValueError):
+            dinheiro = None
+        out.append((str(fare.get("type") or fare.get("fareType") or "?"), milhas, dinheiro))
+    return out
+
+
+def parse_smiles(payload, origem: str, destino: str, ida: date, volta: date | None):
+    """Retorna (voos_ida, voos_volta). Cada voo vira um Voo por tipo de tarifa."""
+    segs = []
+    if isinstance(payload, dict):
+        segs = payload.get("requestedFlightSegmentList") or payload.get("segments") or []
+    idas, voltas = [], []
+    for i, seg in enumerate(segs if isinstance(segs, list) else []):
+        tipo = str(seg.get("type") or "")
+        e_volta = ("2" in tipo) or (i == 1)
+        dia, de, para = (volta, destino, origem) if e_volta else (ida, origem, destino)
+        if dia is None:
+            continue
+        for f in seg.get("flightList") or seg.get("flights") or []:
+            if not isinstance(f, dict):
+                continue
+            dep = f.get("departure") or {}
+            arr = f.get("arrival") or {}
+            cab = str(f.get("cabin") or "")
+            paradas = f.get("stops")
+            if paradas is None:
+                pernas = f.get("legList") or []
+                paradas = max(len(pernas) - 1, 0) if isinstance(pernas, list) else 0
+            assentos = f.get("availableSeats")
+            for tipo_tar, milhas, dinheiro in _tarifas(f):
+                v = Voo(
+                    origem=(dep.get("airport") or {}).get("code") or de if isinstance(dep, dict) else de,
+                    destino=(arr.get("airport") or {}).get("code") or para if isinstance(arr, dict) else para,
+                    data=dia.isoformat(),
+                    voo=_codigo_voo(f),
+                    partida=str(dep.get("date") or "") if isinstance(dep, dict) else "",
+                    chegada=str(arr.get("date") or "") if isinstance(arr, dict) else "",
+                    paradas=int(paradas or 0),
+                    duracao_min=_minutos(f.get("durationNumber") or f.get("duration")),
+                    tarifa=tipo_tar,
+                    milhas=milhas,
+                    moeda="SMILES",
+                    taxas=None,
+                    cabine="executiva" if cab.upper() in ("BUSINESS", "EXECUTIVA", "PREMIUM_ECONOMY_BUSINESS")
+                    else "economica",
+                    assentos=int(assentos) if str(assentos or "").isdigit() else None,
+                    offer_id=str(f.get("uid") or ""),
+                )
+                (voltas if e_volta else idas).append(v)
+    return idas, voltas
+
+
+# --------------------------------------------------------------- browser ---
+
+class SmilesBuscador:
+    def __init__(self, headless: bool = False, timeout_seg: int = 60):
+        self.headless = headless
+        self.timeout_ms = timeout_seg * 1000
+        self._pw = None
+        self.ctx = None
+        self.page = None
+        self.ultimas_respostas: dict = {}
+
+    def __enter__(self):
+        PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+        DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+        self._pw = sync_playwright().start()
+        self.ctx = self._pw.chromium.launch_persistent_context(
+            user_data_dir=str(PROFILE_DIR),
+            headless=self.headless,
+            locale="pt-BR",
+            timezone_id="America/Sao_Paulo",
+            viewport={"width": 1366, "height": 850},
+            args=["--disable-blink-features=AutomationControlled"],
+        )
+        self.ctx.add_init_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined})")
+        self.page = self.ctx.pages[0] if self.ctx.pages else self.ctx.new_page()
+        return self
+
+    def __exit__(self, *a):
+        try:
+            self.ctx and self.ctx.close()
+        finally:
+            self._pw and self._pw.stop()
+
+    def login_manual(self):
+        self.page.goto(BASE, timeout=self.timeout_ms, wait_until="domcontentloaded")
+        print()
+        print("=" * 60)
+        print("Na janela do navegador da SMILES:")
+        print("  1) clique em 'Entrar' no topo do site")
+        print("  2) entre com CPF/número Smiles e senha (e código, se pedir)")
+        print("  3) quando aparecer seu nome/saldo, volte AQUI e aperte Enter")
+        print("=" * 60)
+        input()
+        print("Sessão Smiles salva. URL atual:", self.page.url)
+
+    def buscar_ida_volta(self, origem: str, destino: str, ida: date, volta: date | None, adultos: int = 1):
+        url = url_busca(origem, destino, ida, volta, adultos)
+        tag = f"SM-{origem}-{destino}-{ida.isoformat()}-{volta.isoformat() if volta else 'OW'}"
+        log.info("Smiles: buscando %s", tag)
+        jsons: dict[str, object] = {}
+        busca: dict = {}
+        trafego: list = []
+
+        def on_resp(r):
+            try:
+                if r.request.resource_type not in ("xhr", "fetch"):
+                    return
+                trafego.append((r.status, r.request.method, r.url))
+                if "smiles" not in r.url:
+                    return
+                if any(h in r.url for h in API_HINTS) and r.status in (401, 403, 406, 429):
+                    busca["bloqueio"] = r.status
+                    return
+                try:
+                    dados = r.json()
+                except Exception:  # noqa: BLE001
+                    return
+                nome = r.url.split("?")[0].rstrip("/").split("/")[-2:]
+                jsons["_".join(nome)] = dados
+                if isinstance(dados, dict) and ("requestedFlightSegmentList" in dados or
+                                                any(h in r.url for h in API_HINTS)):
+                    busca["json"] = dados
+                    busca["url"] = r.url
+            except Exception:  # noqa: BLE001
+                pass
+
+        self.page.on("response", on_resp)
+        try:
+            resp = self.page.goto(url, timeout=self.timeout_ms, wait_until="domcontentloaded")
+            if resp and resp.status in (403, 406):
+                self._debug(f"{tag}-{resp.status}")
+                raise Bloqueado(f"Smiles respondeu {resp.status} na página ({tag})")
+            fim = time.time() + self.timeout_ms / 1000
+            while "json" not in busca and "bloqueio" not in busca and time.time() < fim:
+                if "/login" in self.page.url or "login.smiles" in self.page.url:
+                    raise PrecisaLogin("A Smiles pediu login. Rode:  .venv/bin/python monitor_smiles.py --login")
+                self.page.wait_for_timeout(500)
+            self.page.wait_for_timeout(random.randint(1500, 2500))
+        finally:
+            self.page.remove_listener("response", on_resp)
+
+        self.ultimas_respostas = jsons
+        for nome, dados in jsons.items():
+            (DEBUG_DIR / f"{tag}-{nome}.json").write_text(json.dumps(dados, ensure_ascii=False, indent=1))
+        info = {"url": busca.get("url", ""), "trafego": trafego}
+        if "bloqueio" in busca:
+            self._debug(f"{tag}-api{busca['bloqueio']}")
+            raise Bloqueado(f"API da Smiles respondeu {busca['bloqueio']} ({tag})")
+        if "json" not in busca:
+            self._debug(f"{tag}-semresposta")
+            log.warning("Smiles: não capturei a busca de voos (%s). Veja data/debug-smiles", tag)
+            return [], [], info
+        idas, voltas = parse_smiles(busca["json"], origem, destino, ida, volta)
+        return idas, voltas, info
+
+    def _debug(self, nome: str):
+        try:
+            self.page.screenshot(path=str(DEBUG_DIR / f"{nome}.png"), full_page=True)
+            (DEBUG_DIR / f"{nome}.html").write_text(self.page.content())
+        except Exception:  # noqa: BLE001
+            pass
