@@ -22,7 +22,7 @@ logging.basicConfig(
 )
 
 from latam import Bloqueado, PrecisaLogin, resumo_estrutura  # noqa: E402
-from smiles import SmilesBuscador  # noqa: E402
+from smiles import CDP_URL, SmilesBuscador  # noqa: E402
 
 
 def _mil(x: float) -> str:
@@ -44,6 +44,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--login", action="store_true")
     ap.add_argument("--teste", nargs="+", metavar="ARG", help="ORIGEM DESTINO IDA [VOLTA]")
+    ap.add_argument("--sem-chrome-aberto", action="store_true",
+                    help="não conectar no Chrome aberto na porta 9222 (abre um navegador próprio)")
     a = ap.parse_args()
 
     if a.login:
@@ -55,10 +57,10 @@ def main():
         o, d, di = a.teste[:3]
         dv = date.fromisoformat(a.teste[3]) if len(a.teste) > 3 else None
         try:
-            with SmilesBuscador(headless=False) as b:
+            with SmilesBuscador(headless=False, cdp=None if a.sem_chrome_aberto else CDP_URL) as b:
                 idas, voltas, info = b.buscar_ida_volta(o.upper(), d.upper(), date.fromisoformat(di), dv)
                 respostas = b.ultimas_respostas
-        except (PrecisaLogin, Bloqueado) as e:
+        except (PrecisaLogin, Bloqueado, RuntimeError) as e:
             print(f"\n>>> {type(e).__name__}: {e}")
             return
         print("\nAPI de busca:", info.get("url", "")[:200] or "(não encontrada)")

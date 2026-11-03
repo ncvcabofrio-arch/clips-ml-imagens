@@ -165,8 +165,13 @@ def parse_smiles(payload, origem: str, destino: str, ida: date, volta: date | No
 
 # --------------------------------------------------------------- browser ---
 
+CDP_URL = "http://localhost:9222"
+
+
 class SmilesBuscador:
-    def __init__(self, headless: bool = False, timeout_seg: int = 60):
+    def __init__(self, headless: bool = False, timeout_seg: int = 60, cdp: str | None = None):
+        self.cdp = cdp
+        self._pagina_propria = False
         self.headless = headless
         self.timeout_ms = timeout_seg * 1000
         self._pw = None
@@ -178,6 +183,19 @@ class SmilesBuscador:
         PROFILE_DIR.mkdir(parents=True, exist_ok=True)
         DEBUG_DIR.mkdir(parents=True, exist_ok=True)
         self._pw = sync_playwright().start()
+        if self.cdp:
+            # Conecta no Chrome que a pessoa abriu e logou à mão (sem automação no login)
+            try:
+                browser = self._pw.chromium.connect_over_cdp(self.cdp)
+            except Exception as e:  # noqa: BLE001
+                raise RuntimeError(
+                    "Não achei o Chrome da Smiles aberto. Abra-o primeiro com o comando do passo 1 "
+                    f"(porta 9222). Detalhe: {str(e).splitlines()[0][:120]}") from e
+            self.ctx = browser.contexts[0] if browser.contexts else browser.new_context()
+            self.page = self.ctx.new_page()
+            self._pagina_propria = True
+            log.info("Smiles: conectado ao seu Chrome (porta 9222)")
+            return self
         kw = dict(
             user_data_dir=str(PROFILE_DIR),
             headless=self.headless,
@@ -201,7 +219,11 @@ class SmilesBuscador:
 
     def __exit__(self, *a):
         try:
-            self.ctx and self.ctx.close()
+            if self.cdp:
+                if self._pagina_propria and self.page:
+                    self.page.close()   # fecha só a aba do robô; o seu Chrome continua aberto
+            elif self.ctx:
+                self.ctx.close()
         finally:
             self._pw and self._pw.stop()
 
