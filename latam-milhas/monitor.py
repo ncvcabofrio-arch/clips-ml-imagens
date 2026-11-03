@@ -339,8 +339,24 @@ def _msg_par(nome, tot, tx, vi: Voo, vv: Voo, n, cabine) -> str:
 
 
 def relatorio(cfg: dict, top: int = 15):
-    """Combina ida+volta usando os preços já salvos no banco (sem acessar a LATAM)."""
+    """Mostra o ranking com os preços já salvos no banco (sem acessar a LATAM)."""
     con = abrir_db()
+    for vg in cfg.get("viagens") or []:
+        nome = vg.get("nome") or f"{vg['origem']}-{vg['destino']}"
+        o, d = vg["origem"].upper(), vg["destino"].upper()
+        linhas = con.execute(
+            "SELECT ida, volta, voo_ida, tarifa_ida, milhas_ida, taxas_ida, voo_volta, tarifa_volta, milhas_volta, "
+            "taxas_volta, MAX(ts) FROM ida_volta WHERE origem=? AND destino=? GROUP BY ida, volta", (o, d)).fetchall()
+        feitos = con.execute("SELECT COUNT(DISTINCT ida||volta) FROM verificados WHERE origem=? AND destino=?",
+                             (o, d)).fetchone()[0]
+        linhas.sort(key=lambda r: r[4] + r[8])
+        print(f"\n=== {nome} — busca IDA E VOLTA: {len(linhas)} pares com preço "
+              f"({feitos} pares já buscados) ===")
+        print(f"  {'ida → volta':<13} {'total':>9}   {'ida':>9} {'volta':>9}   taxas   voos (ida | volta)        coletado")
+        for r in linhas[:top]:
+            print(f"  {_br(r[0])} → {_br(r[1])} {_mil(r[4] + r[8]):>9}   {_mil(r[4]):>9} {_mil(r[8]):>9}   "
+                  f"R$ {(r[5] or 0) + (r[9] or 0):>4.0f}   {r[2]} | {r[6]}   {r[10][5:16].replace('T', ' ')}")
+    print("\n(abaixo: combinação de trechos SÓ IDA, se houver)")
     for vg in cfg.get("viagens") or []:
         nome = vg.get("nome") or f"{vg['origem']}-{vg['destino']}"
         o, d = vg["origem"].upper(), vg["destino"].upper()
