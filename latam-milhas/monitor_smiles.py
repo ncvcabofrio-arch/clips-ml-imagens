@@ -43,6 +43,8 @@ def mostrar(titulo, voos, n=10):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--login", action="store_true")
+    ap.add_argument("--espiar", action="store_true",
+                    help="só observa: você faz uma busca à mão no Chrome da Smiles e o robô anota as chamadas")
     ap.add_argument("--teste", nargs="+", metavar="ARG", help="ORIGEM DESTINO IDA [VOLTA]")
     ap.add_argument("--sem-chrome-aberto", action="store_true",
                     help="não conectar no Chrome aberto na porta 9222 (abre um navegador próprio)")
@@ -51,6 +53,59 @@ def main():
     if a.login:
         with SmilesBuscador(headless=False, timeout_seg=120) as b:
             b.login_manual()
+        return
+
+    if a.espiar:
+        import json as _json
+        from playwright.sync_api import sync_playwright
+        from smiles import DEBUG_DIR
+        DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+        vistos = []
+
+        def on_resp(r):
+            try:
+                if r.request.resource_type not in ("xhr", "fetch"):
+                    return
+                u = r.url
+                if "smiles" not in u or any(x in u for x in ("member", "plans", "cobranded", "voucher",
+                                                             "ldrelay", "hf-contents", "check-env", "liferay")):
+                    return
+                vistos.append((r.status, r.request.method, u))
+                try:
+                    dados = r.json()
+                except Exception:  # noqa: BLE001
+                    return
+                if any(k in u.lower() for k in ("search", "flight", "availability", "fare")):
+                    nome = "ESPIAO-" + "_".join(u.split("?")[0].rstrip("/").split("/")[-3:])
+                    (DEBUG_DIR / f"{nome}.json").write_text(_json.dumps(dados, ensure_ascii=False, indent=1))
+                    print(f"\n### capturei {r.request.method} {u[:200]}\n{resumo_estrutura(dados, 2500)}")
+            except Exception:  # noqa: BLE001
+                pass
+
+        with sync_playwright() as pw:
+            try:
+                browser = pw.chromium.connect_over_cdp(CDP_URL)
+            except Exception as e:  # noqa: BLE001
+                print(f">>> Não achei o Chrome da Smiles aberto (porta 9222): {str(e).splitlines()[0]}")
+                return
+            ctx = browser.contexts[0]
+            ctx.on("response", on_resp)
+            for pg in ctx.pages:
+                pg.on("response", on_resp)
+            ctx.on("page", lambda pg: pg.on("response", on_resp))
+            print("=" * 70)
+            print("ESPIANDO. No Chrome da Smiles, faça uma busca normal à mão:")
+            print("  Ida e volta, Rio de Janeiro (GIG) → Orlando (MCO), 22/02/2027 a 04/03/2027, 1 adulto")
+            print("Espere os voos aparecerem na tela. Depois volte AQUI e aperte Enter.")
+            print("=" * 70)
+            input()
+            print("\nURL da página de resultados:")
+            for pg in ctx.pages:
+                if "smiles" in pg.url:
+                    print("  ", pg.url[:400])
+            print(f"\nChamadas da Smiles anotadas ({len(vistos)}):")
+            for st, m, u in vistos[-40:]:
+                print(f"  {st} {m} {u[:200]}")
         return
 
     if a.teste:
