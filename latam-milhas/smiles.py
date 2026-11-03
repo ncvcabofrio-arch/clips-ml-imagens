@@ -23,7 +23,7 @@ log = logging.getLogger("smiles")
 BASE = "https://www.smiles.com.br"
 RAIZ = Path(__file__).parent
 DEBUG_DIR = RAIZ / "data" / "debug-smiles"
-PROFILE_DIR = RAIZ / "data" / "browser-profile-smiles"
+PROFILE_DIR = RAIZ / "data" / "browser-profile-smiles-chrome"
 # trechos de URL que identificam a API de busca de voos da Smiles
 API_HINTS = ("flightsearch", "airlines/search", "/search?")
 
@@ -178,14 +178,23 @@ class SmilesBuscador:
         PROFILE_DIR.mkdir(parents=True, exist_ok=True)
         DEBUG_DIR.mkdir(parents=True, exist_ok=True)
         self._pw = sync_playwright().start()
-        self.ctx = self._pw.chromium.launch_persistent_context(
+        kw = dict(
             user_data_dir=str(PROFILE_DIR),
             headless=self.headless,
             locale="pt-BR",
             timezone_id="America/Sao_Paulo",
             viewport={"width": 1366, "height": 850},
             args=["--disable-blink-features=AutomationControlled"],
+            ignore_default_args=["--enable-automation"],
         )
+        try:
+            # Google Chrome instalado no computador (mais difícil de ser detectado)
+            self.ctx = self._pw.chromium.launch_persistent_context(channel="chrome", **kw)
+            log.info("Smiles: usando o Google Chrome instalado")
+        except Exception as e:  # noqa: BLE001
+            log.warning("Smiles: Google Chrome não encontrado (%s); usando o Chromium do robô",
+                        str(e).splitlines()[0][:100])
+            self.ctx = self._pw.chromium.launch_persistent_context(**kw)
         self.ctx.add_init_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined})")
         self.page = self.ctx.pages[0] if self.ctx.pages else self.ctx.new_page()
         return self
