@@ -38,7 +38,9 @@ espera_entre_buscas_seg: [60, 120]  # pausa aleatória entre buscas
 max_buscas_por_rodada: 10           # cada execução busca no máx. isso; a próxima continua de onde parou
 revalidar_horas: 20                 # um par de datas só é buscado de novo depois disso
 validade_preco_horas: 72            # preços mais velhos que isso não entram no ranking
-pausa_bloqueio_horas: 3             # se a LATAM bloquear, para tudo por esse tempo
+espera_apos_bloqueio_min: [3.5, 4.5]  # freio da LATAM (403): espera ~4 min e tenta a mesma data de novo
+max_bloqueios_seguidos: 3           # depois de 3 freios seguidos, desiste da rodada
+pausa_bloqueio_horas: 3             # ...e só volta a buscar depois desse tempo
 timeout_busca_seg: 60
 headless: false        # false = abre janela (Mac) / tela virtual xvfb (VPS)
 proxy: ""              # opcional: "http://usuario:senha@host:porta"

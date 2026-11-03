@@ -241,7 +241,7 @@ def varrer_viagem(b: LatamBuscador, con, cfg: dict, vg: dict, pausa) -> int:
         log.info("[%s] %d de %d pares precisam de busca; nesta rodada: até %d",
                  nome, len(pendentes), len(todos), limite_buscas)
         max_freios = int(cfg.get("max_bloqueios_seguidos", 3))
-        espera_freio = cfg.get("espera_apos_bloqueio_min", [10, 15])
+        espera_freio = cfg.get("espera_apos_bloqueio_min", [3.5, 4.5])
         freios, erros = 0, 0
         fila = list(pendentes[:limite_buscas])
         parar = False
