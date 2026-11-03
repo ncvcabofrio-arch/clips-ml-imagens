@@ -9,6 +9,7 @@ Uso:
 from __future__ import annotations
 
 import argparse
+import os
 import logging
 import random
 import sqlite3
@@ -463,6 +464,112 @@ def comparar(cfg: dict, o: str, d: str, inicio: date, n_datas: int, dias_viagem:
               f"{f(oii):>9} {f(ovv):>9} {f(owt):>9} | {dif}" + (f"  (status voltas {st})" if not rt else ""))
 
 
+def _horas(m) -> str:
+    return f"{m // 60}h{m % 60:02d}" if m else "?"
+
+
+def melhores(cfg: dict, top: int = 12):
+    """Monta as melhores combinações com as respostas de IDA E VOLTA já salvas
+    (data/debug/RT-*-idas.json e *-voltas.json), sem acessar a LATAM.
+    Combina 9/10/11 dias, evita o período configurado (ex.: Carnaval) e mostra
+    o mais barato, o mais rápido e um meio-termo para cada par de datas."""
+    import glob
+    import json as _json
+    import re as _re
+    from latam import DEBUG_DIR, parse_ofertas
+
+    vg = (cfg.get("viagens") or [{}])[0]
+    o, d = vg["origem"].upper(), vg["destino"].upper()
+    cabine = str(vg.get("cabine", "economica")).lower()
+    mp = vg.get("max_paradas")
+    duracoes = [int(n) for n in (cfg.get("melhores_dias") or [9, 10, 11])]
+    evitar = [(_data(a), _data(b)) for a, b in (cfg.get("evitar_periodos") or [])]
+    milhas_tenho = float(cfg.get("milhas_disponiveis") or 0)
+    pax = int(cfg.get("passageiros") or 1)
+    folga_h = float(cfg.get("folga_horas_rapido", 2))
+
+    def carregar(sufixo, de, para):
+        por_dia: dict[date, tuple[float, list]] = {}
+        padrao = str(DEBUG_DIR / f"RT-{o}-{d}-*-{sufixo}.json")
+        for f in glob.glob(padrao):
+            m = _re.search(r"RT-\w+-\w+-(\d{4}-\d{2}-\d{2})-(\d{4}-\d{2}-\d{2})-", f)
+            if not m:
+                continue
+            dia = date.fromisoformat(m.group(1) if sufixo == "idas" else m.group(2))
+            mt = os.path.getmtime(f)
+            if dia in por_dia and por_dia[dia][0] >= mt:
+                continue
+            try:
+                voos = parse_ofertas(_json.load(open(f)), de, para, dia)
+            except Exception:  # noqa: BLE001
+                continue
+            # descarta voo que mostra menos assentos que o número de passageiros
+            voos = [v for v in _filtrar(voos, cabine, mp)
+                    if v.duracao_min and (v.assentos is None or v.assentos >= pax)]
+            if voos:
+                por_dia[dia] = (mt, voos)
+        return {k: v[1] for k, v in por_dia.items()}
+
+    idas, voltas = carregar("idas", o, d), carregar("voltas", d, o)
+
+    def escolhas(vs):
+        barato = min(vs, key=lambda v: (v.milhas, v.duracao_min))
+        rapido = min(vs, key=lambda v: (v.duracao_min, v.milhas))
+        perto = [v for v in vs if v.duracao_min <= rapido.duracao_min + folga_h * 60]
+        meio = min(perto, key=lambda v: (v.milhas, v.duracao_min))
+        return barato, rapido, meio
+
+    combos = []
+    for x, li in idas.items():
+        for n in duracoes:
+            y = x + timedelta(days=n)
+            if y not in voltas:
+                continue
+            if any(not (y < a or x > b) for a, b in evitar):
+                continue
+            bi, ri, mi = escolhas(li)
+            bv, rv, mv = escolhas(voltas[y])
+            combos.append({"x": x, "y": y, "n": n, "barato": (bi, bv), "rapido": (ri, rv), "meio": (mi, mv)})
+
+    def linha(c, chave):
+        vi, vv = c[chave]
+        tot = vi.milhas + vv.milhas
+        tx = (vi.taxas or 0) + (vv.taxas or 0)
+        cabe = ("✅" if tot * pax <= milhas_tenho else "❌") if milhas_tenho else ""
+        tot_g = f" ({pax}x = {_mil(tot * pax)} {cabe})" if pax > 1 else ""
+        return (f"  {_br(c['x'].isoformat())} → {_br(c['y'].isoformat())} ({c['n']:>2}d) {_mil(tot):>9}/pessoa{tot_g} "
+                f"+ R$ {tx * pax:>5.0f} taxas | "
+                f"ida {_horas(vi.duracao_min)} {vi.paradas}p {vi.partida[11:16]} {vi.voo} | "
+                f"volta {_horas(vv.duracao_min)} {vv.paradas}p {vv.partida[11:16]} {vv.voo}")
+
+    def total(c, chave):
+        return c[chave][0].milhas + c[chave][1].milhas
+
+    def tempo(c, chave):
+        return c[chave][0].duracao_min + c[chave][1].duracao_min
+
+    if pax > 1:
+        print(f"\n{pax} passageiros, {_mil(milhas_tenho)} milhas disponíveis = até {_mil(milhas_tenho / pax)} por pessoa. "
+              f"Voos com menos de {pax} assentos visíveis foram descartados.")
+    print(f"\nDados: {len(idas)} datas de ida e {len(voltas)} datas de volta salvas; "
+          f"{len(combos)} combinações de {'/'.join(map(str, duracoes))} dias"
+          + (f" fora de {', '.join(f'{_br(a.isoformat())}–{_br(b.isoformat())}' for a, b in evitar)}" if evitar else ""))
+
+    print(f"\n=== 1) MAIS BARATAS (qualquer duração de voo) ===")
+    for c in sorted(combos, key=lambda c: (total(c, "barato"), tempo(c, "barato")))[:top]:
+        print(linha(c, "barato"))
+
+    print(f"\n=== 2) MEIO-TERMO: voos até {folga_h:.0f}h mais longos que o mais rápido do dia, pelo menor preço ===")
+    for c in sorted(combos, key=lambda c: (total(c, "meio"), tempo(c, "meio")))[:top]:
+        print(linha(c, "meio"))
+
+    print("\n=== 3) MAIS RÁPIDAS (menor tempo somado de ida + volta) ===")
+    for c in sorted(combos, key=lambda c: (tempo(c, "rapido"), total(c, "rapido")))[:top]:
+        print(linha(c, "rapido"))
+    print("\nObs.: preços buscados para 1 adulto; para 4 pode mudar. Confirme no site com 4 passageiros.")
+    print("Obs.: 9 e 11 dias juntam a ida de uma busca com a volta de outra; confirme o preço no site antes de emitir.")
+
+
 def varredura(cfg: dict):
     ate = em_pausa()
     if ate:
@@ -511,6 +618,8 @@ def main():
                     help="mostra as melhores combinações com os preços já coletados (sem acessar a LATAM)")
     ap.add_argument("--comparar", nargs="+", metavar="ARG",
                     help="ORIGEM DESTINO AAAA-MM-DD N_DATAS [DIAS_VIAGEM]: compara ida-e-volta x só ida")
+    ap.add_argument("--melhores", action="store_true",
+                    help="monta as melhores combinações (9/10/11 dias, mais barato/rápido) com os dados já salvos")
     ap.add_argument("--login", action="store_true", help="abre o navegador para você fazer login na LATAM Pass")
     a = ap.parse_args()
     (RAIZ / "data").mkdir(exist_ok=True)
@@ -532,6 +641,10 @@ def main():
             comparar(cfg, o.upper(), d.upper(), date.fromisoformat(ini), int(n), dv)
         except (PrecisaLogin, Bloqueado) as e:
             print(f"\n>>> {type(e).__name__}: {e}")
+        return
+
+    if a.melhores:
+        melhores(cfg)
         return
 
     if a.relatorio:
