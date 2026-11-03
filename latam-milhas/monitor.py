@@ -487,6 +487,8 @@ def melhores(cfg: dict, top: int = 12):
     milhas_tenho = float(cfg.get("milhas_disponiveis") or 0)
     pax = int(cfg.get("passageiros") or 1)
     folga_h = float(cfg.get("folga_horas_rapido", 2))
+    volta_ate = _data(cfg["melhores_volta_ate"]) if cfg.get("melhores_volta_ate") else None
+    ida_de = _data(cfg["melhores_ida_de"]) if cfg.get("melhores_ida_de") else None
 
     def carregar(sufixo, de, para):
         por_dia: dict[date, tuple[float, list]] = {}
@@ -527,6 +529,8 @@ def melhores(cfg: dict, top: int = 12):
                 continue
             if any(not (y < a or x > b) for a, b in evitar):
                 continue
+            if (volta_ate and y > volta_ate) or (ida_de and x < ida_de):
+                continue
             bi, ri, mi = escolhas(li)
             bv, rv, mv = escolhas(voltas[y])
             combos.append({"x": x, "y": y, "n": n, "barato": (bi, bv), "rapido": (ri, rv), "meio": (mi, mv)})
@@ -553,6 +557,7 @@ def melhores(cfg: dict, top: int = 12):
               f"Voos com menos de {pax} assentos visíveis foram descartados.")
     print(f"\nDados: {len(idas)} datas de ida e {len(voltas)} datas de volta salvas; "
           f"{len(combos)} combinações de {'/'.join(map(str, duracoes))} dias"
+          + (f", volta até {_br(volta_ate.isoformat())}" if volta_ate else "")
           + (f" fora de {', '.join(f'{_br(a.isoformat())}–{_br(b.isoformat())}' for a, b in evitar)}" if evitar else ""))
 
     print(f"\n=== 1) MAIS BARATAS (qualquer duração de voo) ===")
@@ -618,6 +623,7 @@ def main():
                     help="mostra as melhores combinações com os preços já coletados (sem acessar a LATAM)")
     ap.add_argument("--comparar", nargs="+", metavar="ARG",
                     help="ORIGEM DESTINO AAAA-MM-DD N_DATAS [DIAS_VIAGEM]: compara ida-e-volta x só ida")
+    ap.add_argument("--volta-ate", metavar="AAAA-MM-DD", help="com --melhores: só voltas até essa data")
     ap.add_argument("--melhores", action="store_true",
                     help="monta as melhores combinações (9/10/11 dias, mais barato/rápido) com os dados já salvos")
     ap.add_argument("--login", action="store_true", help="abre o navegador para você fazer login na LATAM Pass")
@@ -644,6 +650,8 @@ def main():
         return
 
     if a.melhores:
+        if a.volta_ate:
+            cfg["melhores_volta_ate"] = a.volta_ate
         melhores(cfg)
         return
 
