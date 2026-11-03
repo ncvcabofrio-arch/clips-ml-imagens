@@ -64,18 +64,21 @@ def main():
 
         def on_resp(r):
             try:
-                if r.request.resource_type not in ("xhr", "fetch"):
+                ct = (r.headers or {}).get("content-type", "")
+                if "json" not in ct and r.request.resource_type not in ("xhr", "fetch"):
                     return
                 u = r.url
-                if "smiles" not in u or any(x in u for x in ("member", "plans", "cobranded", "voucher",
-                                                             "ldrelay", "hf-contents", "check-env", "liferay")):
+                if any(x in u for x in ("member", "plans", "cobranded", "voucher", "ldrelay", "hf-contents",
+                                        "check-env", "liferay", "react-components", "clarity", "datadog",
+                                        "demdex", "onetrust", "loggly", "voxus", "ipify", "oraclersys")):
                     return
                 vistos.append((r.status, r.request.method, u))
                 try:
                     dados = r.json()
                 except Exception:  # noqa: BLE001
                     return
-                if any(k in u.lower() for k in ("search", "flight", "availability", "fare")):
+                if any(k in u.lower() for k in ("search", "flight", "availability", "fare")) or (
+                        isinstance(dados, dict) and "requestedFlightSegmentList" in dados):
                     nome = "ESPIAO-" + "_".join(u.split("?")[0].rstrip("/").split("/")[-3:])
                     (DEBUG_DIR / f"{nome}.json").write_text(_json.dumps(dados, ensure_ascii=False, indent=1))
                     print(f"\n### capturei {r.request.method} {u[:200]}\n{resumo_estrutura(dados, 2500)}")
@@ -90,11 +93,7 @@ def main():
                 return
             ctx = browser.contexts[0]
             ctx.on("response", on_resp)
-            for pg in ctx.pages:
-                pg.on("response", on_resp)
-            ctx.on("page", lambda pg: pg.on("response", on_resp))
             aba = ctx.new_page()
-            aba.on("response", on_resp)
             aba.goto("https://www.smiles.com.br/portal/home", wait_until="domcontentloaded", timeout=60000)
             aba.bring_to_front()
             print("=" * 70)
@@ -129,8 +128,13 @@ def main():
         mostrar("IDAS", idas)
         mostrar("VOLTAS", voltas)
         if not info.get("url"):
-            proprias = [t for t in info["trafego"] if ("smiles" in t[2] or "voegol" in t[2])
-                        and not any(x in t[2] for x in ("member", "plans", "cobranded", "voxus"))]
+            print("\nURL aberta:", info.get("pagina", "")[:300])
+            print("\nTexto da página (início):", info.get("texto", "")[:1200])
+            proprias = [t for t in info["trafego"]
+                        if not any(x in t[2] for x in ("member", "plans", "cobranded", "voxus", "hf-contents",
+                                                       "react-components", "check-env", "ldrelay", "clarity",
+                                                       "datadog", "demdex", "onetrust", "loggly", "oraclersys",
+                                                       "ipify"))]
             print(f"\nChamadas da Smiles feitas pela página ({len(proprias)}):")
             for st, m, u in proprias[-40:]:
                 print(f"  {st} {m} {u[:160]}")

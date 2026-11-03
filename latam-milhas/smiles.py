@@ -32,8 +32,8 @@ IGNORAR = ("voucher", "member", "plans", "cobranded", "cap-rate", "easy-travel",
 
 
 def _ms(d: date) -> int:
-    """Smiles usa a data como timestamp em milissegundos (meio-dia UTC)."""
-    return int(datetime(d.year, d.month, d.day, 12, tzinfo=timezone.utc).timestamp() * 1000)
+    """Smiles usa a data como timestamp em ms: meia-noite de Brasília (03:00 UTC)."""
+    return int(datetime(d.year, d.month, d.day, 3, tzinfo=timezone.utc).timestamp() * 1000)
 
 
 def url_busca(origem: str, destino: str, ida: date, volta: date | None, adultos: int = 1) -> str:
@@ -45,13 +45,13 @@ def url_busca(origem: str, destino: str, ida: date, volta: date | None, adultos:
         "infants": 0,
         "isElegible": "false",
         "isFlexibleDateChecked": "false",
-        "searchType": "congenere",      # inclui companhias parceiras
+        "searchType": "g3",
         "segments": 1,
         "tripType": 1 if volta else 2,  # 1 = ida e volta, 2 = só ida
-        "originAirport": origem,
+        "originAirport": "RIO" if origem in ("GIG", "SDU", "RIO") else origem,
         "originCity": "",
         "originCountry": "",
-        "originAirportIsAny": "false",
+        "originAirportIsAny": "true" if origem in ("GIG", "SDU", "RIO") else "false",
         "destinationAirport": destino,
         "destinCity": "",
         "destinCountry": "",
@@ -60,7 +60,12 @@ def url_busca(origem: str, destino: str, ida: date, volta: date | None, adultos:
     }
     if volta:
         q["returnDate"] = _ms(volta)
-    return f"{BASE}/mfe/emissao-passagem/?{urlencode(q)}"
+    # mesma ordem de parâmetros que o site usa
+    ordem = ["adults", "cabin", "children", "departureDate", "infants", "isElegible", "isFlexibleDateChecked",
+             "returnDate", "searchType", "segments", "tripType", "originAirport", "originCity", "originCountry",
+             "originAirportIsAny", "destinationAirport", "destinCity", "destinCountry", "destinAirportIsAny",
+             "novo-resultado-voos"]
+    return f"{BASE}/mfe/emissao-passagem/?{urlencode([(k, q[k]) for k in ordem if k in q])}"
 
 
 # ---------------------------------------------------------------- parser ---
@@ -252,10 +257,11 @@ class SmilesBuscador:
 
         def on_resp(r):
             try:
-                if r.request.resource_type not in ("xhr", "fetch"):
+                ct = (r.headers or {}).get("content-type", "")
+                if r.request.resource_type not in ("xhr", "fetch", "other") and "json" not in ct:
                     return
                 trafego.append((r.status, r.request.method, r.url))
-                if "smiles" not in r.url:
+                if "json" not in ct and r.request.resource_type not in ("xhr", "fetch"):
                     return
                 if any(h in r.url for h in API_HINTS) and r.status in (401, 403, 406, 429):
                     busca["bloqueio"] = r.status
@@ -278,7 +284,7 @@ class SmilesBuscador:
             except Exception:  # noqa: BLE001
                 pass
 
-        self.page.on("response", on_resp)
+        self.ctx.on("response", on_resp)   # nível do navegador: pega também abas novas e workers
         try:
             resp = self.page.goto(url, timeout=self.timeout_ms, wait_until="domcontentloaded")
             if resp and resp.status in (403, 406):
@@ -292,13 +298,20 @@ class SmilesBuscador:
             if "json" not in busca:
                 log.info("Smiles: a página não fez a busca de voos em %ds", self.timeout_ms // 1000)
             self.page.wait_for_timeout(random.randint(1500, 2500))
+            if "json" not in busca:
+                try:
+                    texto = " ".join(self.page.inner_text("body", timeout=5000).split())
+                    busca["texto"] = texto[:1500]
+                except Exception:  # noqa: BLE001
+                    pass
         finally:
-            self.page.remove_listener("response", on_resp)
+            self.ctx.remove_listener("response", on_resp)
 
         self.ultimas_respostas = jsons
         for nome, dados in jsons.items():
             (DEBUG_DIR / f"{tag}-{nome}.json").write_text(json.dumps(dados, ensure_ascii=False, indent=1))
-        info = {"url": busca.get("url", ""), "trafego": trafego}
+        info = {"url": busca.get("url", ""), "trafego": trafego, "texto": busca.get("texto", ""),
+                "pagina": url}
         if "bloqueio" in busca:
             self._debug(f"{tag}-api{busca['bloqueio']}")
             raise Bloqueado(f"API da Smiles respondeu {busca['bloqueio']} ({tag})")
