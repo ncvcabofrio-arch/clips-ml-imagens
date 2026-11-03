@@ -240,15 +240,42 @@ def varrer_viagem(b: LatamBuscador, con, cfg: dict, vg: dict, pausa) -> int:
         pendentes.sort(key=lambda p: ult.get((p[0].isoformat(), p[1].isoformat()), ""))
         log.info("[%s] %d de %d pares precisam de busca; nesta rodada: até %d",
                  nome, len(pendentes), len(todos), limite_buscas)
-        for x, y, n in pendentes[:limite_buscas]:
+        max_freios = int(cfg.get("max_bloqueios_seguidos", 3))
+        espera_freio = cfg.get("espera_apos_bloqueio_min", [10, 15])
+        freios, erros = 0, 0
+        fila = list(pendentes[:limite_buscas])
+        parar = False
+        while fila and not parar:
+            x, y, n = fila[0]
             pausa()
             try:
                 lista_i, lista_v, info = b.buscar_ida_volta(o, d, x, y, _cabine_url(cabine), adultos, filtro=filtro)
+                freios, erros = 0, 0
             except Bloqueado as e:
-                log.error("BLOQUEADO: %s — pausando as buscas por %s h", e, cfg.get("pausa_bloqueio_horas", 3))
-                pausar_por_bloqueio(cfg)
-                telegram(cfg, f"⚠️ LATAM bloqueou temporariamente. Pausando {cfg.get('pausa_bloqueio_horas', 3)} h.")
-                break
+                freios += 1
+                if freios >= max_freios:
+                    log.error("BLOQUEADO %d vezes seguidas (%s) — pausando por %s h", freios, e,
+                              cfg.get("pausa_bloqueio_horas", 3))
+                    pausar_por_bloqueio(cfg)
+                    telegram(cfg, f"⚠️ LATAM bloqueou {freios}x seguidas. Pausando {cfg.get('pausa_bloqueio_horas', 3)} h.")
+                    break
+                minutos = random.uniform(*espera_freio)
+                log.warning("Freio da LATAM (403) em %s → %s. Esperando %.0f min e tentando de novo (%d/%d)",
+                            x, y, minutos, freios, max_freios)
+                time.sleep(minutos * 60)
+                continue  # tenta a mesma data
+            except PrecisaLogin:
+                raise
+            except Exception as e:  # noqa: BLE001  (rede, página que não carregou, etc.)
+                erros += 1
+                log.error("Erro inesperado em %s → %s: %s: %s", x, y, type(e).__name__,
+                          str(e).splitlines()[0][:200] if str(e) else "")
+                fila.pop(0)
+                if erros >= 3:
+                    log.error("3 erros seguidos — encerrando a rodada (rode de novo depois)")
+                    parar = True
+                continue
+            fila.pop(0)
             con.execute("INSERT INTO verificados VALUES (?,?,?,?,?)",
                         (o, d, x.isoformat(), y.isoformat(), datetime.now().isoformat(timespec="seconds")))
             con.commit()
@@ -732,6 +759,11 @@ def main():
         log.error("BLOQUEADO: %s", e)
         telegram(cfg, f"⚠️ Monitor LATAM bloqueado pelo anti-bot: {e}\nVeja data/debug na VPS.")
         sys.exit(2)
+    except KeyboardInterrupt:
+        log.warning("Interrompido pelo usuário")
+    except Exception as e:  # noqa: BLE001
+        log.exception("ERROR inesperado: %s", e)
+        sys.exit(1)
     finally:
         fd.close()
         LOCK.unlink(missing_ok=True)
