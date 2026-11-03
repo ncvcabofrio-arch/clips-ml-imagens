@@ -11,7 +11,7 @@ viagens:
     dias_de_viagem: [10]       # ex.: [9, 10, 11] testa 3x mais buscas
     modo: ida_e_volta          # ida_e_volta (busca RT) | separado (cada trecho como só ida)
     cabine: economica          # economica | executiva | qualquer
-    max_paradas: 1             # 0 = só voo direto
+    max_paradas: 2             # 0 = só voo direto
     max_milhas_total: 280000   # alerta quando IDA + VOLTA (por pessoa) for <= isso
 
 # Rotas só de ida (opcional). Exemplo:
@@ -26,7 +26,11 @@ viagens:
 adultos: 1
 
 # Comportamento do robô (seja gentil para não ser bloqueado)
-espera_entre_buscas_seg: [20, 45]   # pausa aleatória entre buscas
+espera_entre_buscas_seg: [60, 120]  # pausa aleatória entre buscas
+max_buscas_por_rodada: 10           # cada execução busca no máx. isso; a próxima continua de onde parou
+revalidar_horas: 20                 # um par de datas só é buscado de novo depois disso
+validade_preco_horas: 72            # preços mais velhos que isso não entram no ranking
+pausa_bloqueio_horas: 3             # se a LATAM bloquear, para tudo por esse tempo
 timeout_busca_seg: 60
 headless: false        # false = abre janela (Mac) / tela virtual xvfb (VPS)
 proxy: ""              # opcional: "http://usuario:senha@host:porta"

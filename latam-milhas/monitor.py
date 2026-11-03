@@ -54,6 +54,7 @@ def abrir_db() -> sqlite3.Connection:
             partida TEXT, chegada TEXT, paradas INT, milhas REAL, moeda TEXT, taxas REAL
         );
         CREATE TABLE IF NOT EXISTS alertas (chave TEXT PRIMARY KEY, milhas REAL, ts TEXT);
+        CREATE TABLE IF NOT EXISTS verificados (origem TEXT, destino TEXT, ida TEXT, volta TEXT, ts TEXT);
         CREATE TABLE IF NOT EXISTS ida_volta (
             ts TEXT, origem TEXT, destino TEXT, ida TEXT, volta TEXT,
             voo_ida TEXT, tarifa_ida TEXT, milhas_ida REAL, taxas_ida REAL,
@@ -72,6 +73,22 @@ def salvar(con, voos: list[Voo]):
           v.paradas, v.milhas, v.moeda, v.taxas) for v in voos],
     )
     con.commit()
+
+
+PAUSA = RAIZ / "data" / "pausa_ate.txt"
+
+
+def pausar_por_bloqueio(cfg: dict):
+    ate = datetime.now() + timedelta(hours=float(cfg.get("pausa_bloqueio_horas", 3)))
+    PAUSA.write_text(ate.isoformat(timespec="seconds"))
+
+
+def em_pausa() -> datetime | None:
+    try:
+        ate = datetime.fromisoformat(PAUSA.read_text().strip())
+    except Exception:  # noqa: BLE001
+        return None
+    return ate if ate > datetime.now() else None
 
 
 def salvar_rt(con, vi: Voo, vv: Voo):
@@ -199,22 +216,57 @@ def varrer_viagem(b: LatamBuscador, con, cfg: dict, vg: dict, pausa) -> int:
     pares = []
     filtro = lambda vs: _filtrar(vs, cabine, vg.get("max_paradas"))  # noqa: E731
     if str(vg.get("modo", "ida_e_volta")) == "ida_e_volta":
-        # Uma busca de IDA E VOLTA por par de datas (como no site)
-        for x in idas:
-            for n in duracoes:
-                y = x + timedelta(days=n)
-                pausa()
+        # Uma busca de IDA E VOLTA por par de datas (como no site), em fatias:
+        # cada rodada busca só os pares verificados há mais tempo, até o limite.
+        revalidar = float(cfg.get("revalidar_horas", 20))
+        limite_buscas = int(cfg.get("max_buscas_por_rodada", 10))
+        todos = [(x, x + timedelta(days=n), n) for x in idas for n in duracoes]
+        ult: dict = {}
+        for tabela in ("verificados", "ida_volta"):
+            for r in con.execute(f"SELECT ida, volta, MAX(ts) FROM {tabela} WHERE origem=? AND destino=? "
+                                 "GROUP BY ida, volta", (o, d)):
+                ult[(r[0], r[1])] = max(ult.get((r[0], r[1]), ""), r[2])
+        agora = datetime.now()
+        pendentes = [p for p in todos
+                     if (p[0].isoformat(), p[1].isoformat()) not in ult
+                     or agora - datetime.fromisoformat(ult[(p[0].isoformat(), p[1].isoformat())])
+                     > timedelta(hours=revalidar)]
+        pendentes.sort(key=lambda p: ult.get((p[0].isoformat(), p[1].isoformat()), ""))
+        log.info("[%s] %d de %d pares precisam de busca; nesta rodada: até %d",
+                 nome, len(pendentes), len(todos), limite_buscas)
+        for x, y, n in pendentes[:limite_buscas]:
+            pausa()
+            try:
                 lista_i, lista_v, info = b.buscar_ida_volta(o, d, x, y, _cabine_url(cabine), adultos, filtro=filtro)
-                vi = info.get("ida_escolhida")
-                bons_v = filtro(lista_v)
-                if vi and bons_v:
-                    vv = min(bons_v, key=lambda v: v.milhas)
-                    salvar_rt(con, vi, vv)
-                    pares.append((vi.milhas + vv.milhas, (vi.taxas or 0) + (vv.taxas or 0), vi, vv, n))
-                    log.info("  %s → %s: ida %s + volta %s = %s pts", x, y, _mil(vi.milhas), _mil(vv.milhas),
-                             _mil(vi.milhas + vv.milhas))
-                else:
-                    log.info("  %s → %s: nada disponível com os filtros", x, y)
+            except Bloqueado as e:
+                log.error("BLOQUEADO: %s — pausando as buscas por %s h", e, cfg.get("pausa_bloqueio_horas", 3))
+                pausar_por_bloqueio(cfg)
+                telegram(cfg, f"⚠️ LATAM bloqueou temporariamente. Pausando {cfg.get('pausa_bloqueio_horas', 3)} h.")
+                break
+            con.execute("INSERT INTO verificados VALUES (?,?,?,?,?)",
+                        (o, d, x.isoformat(), y.isoformat(), datetime.now().isoformat(timespec="seconds")))
+            con.commit()
+            vi = info.get("ida_escolhida")
+            bons_v = filtro(lista_v)
+            if vi and bons_v:
+                vv = min(bons_v, key=lambda v: v.milhas)
+                salvar_rt(con, vi, vv)
+                log.info("  %s → %s: ida %s + volta %s = %s pts", x, y, _mil(vi.milhas), _mil(vv.milhas),
+                         _mil(vi.milhas + vv.milhas))
+            else:
+                log.info("  %s → %s: nada disponível com os filtros", x, y)
+        # Combinações: usa o preço mais recente salvo de cada par (desta e de rodadas anteriores)
+        validade = timedelta(hours=float(cfg.get("validade_preco_horas", 72)))
+        for x, y, n in todos:
+            r = con.execute(
+                "SELECT ts, voo_ida, tarifa_ida, milhas_ida, taxas_ida, voo_volta, tarifa_volta, milhas_volta, "
+                "taxas_volta FROM ida_volta WHERE origem=? AND destino=? AND ida=? AND volta=? "
+                "ORDER BY ts DESC LIMIT 1", (o, d, x.isoformat(), y.isoformat())).fetchone()
+            if not r or agora - datetime.fromisoformat(r[0]) > validade:
+                continue
+            vi = Voo(o, d, x.isoformat(), r[1], "", "", 0, None, r[2], r[3], "LOYALTY_POINTS", r[4])
+            vv = Voo(d, o, y.isoformat(), r[5], "", "", 0, None, r[6], r[7], "LOYALTY_POINTS", r[8])
+            pares.append((r[3] + r[7], (r[4] or 0) + (r[8] or 0), vi, vv, n))
     else:
         # Modo antigo: cada trecho como só ida, depois combina
         melhor_ida: dict[date, Voo] = {}
@@ -275,8 +327,8 @@ def _msg_par(nome, tot, tx, vi: Voo, vv: Voo, n, cabine) -> str:
     from latam import url_busca
 
     def linha(v: Voo, rot):
-        p = "direto" if v.paradas == 0 else f"{v.paradas} parada(s)"
-        return (f"{rot} {_br(v.data)} {v.partida[11:16]} · {v.voo} · {p} · {v.tarifa} · "
+        p = f"{v.voo.count('+')} parada(s)" if "+" in v.voo else "direto"
+        return (f"{rot} {_br(v.data)} · {v.voo} · {p} · {v.tarifa} · "
                 f"{_mil(v.milhas)} pts + R$ {(v.taxas or 0):.0f}")
     li = url_busca(vi.origem, vi.destino, date.fromisoformat(vi.data), _cabine_url(cabine), 1)
     lv = url_busca(vv.origem, vv.destino, date.fromisoformat(vv.data), _cabine_url(cabine), 1)
@@ -396,8 +448,12 @@ def comparar(cfg: dict, o: str, d: str, inicio: date, n_datas: int, dias_viagem:
 
 
 def varredura(cfg: dict):
+    ate = em_pausa()
+    if ate:
+        log.warning("Em pausa por bloqueio da LATAM até %s. Nada a fazer agora.", ate.strftime("%d/%m %H:%M"))
+        return
     con = abrir_db()
-    espera = cfg.get("espera_entre_buscas_seg", [20, 45])
+    espera = cfg.get("espera_entre_buscas_seg", [60, 120])
     adultos = int(cfg.get("adultos", 1))
     total, alertas = 0, 0
     estado = {"primeira": True}
