@@ -221,7 +221,12 @@ def varrer_viagem(b: LatamBuscador, con, cfg: dict, vg: dict, pausa) -> int:
         # cada rodada busca só os pares verificados há mais tempo, até o limite.
         revalidar = float(cfg.get("revalidar_horas", 20))
         limite_buscas = int(cfg.get("max_buscas_por_rodada", 10))
-        todos = [(x, x + timedelta(days=n), n) for x in idas for n in duracoes]
+        evitar = [(_data(a), _data(b)) for a, b in (cfg.get("evitar_periodos") or [])]
+        todos = [(x, x + timedelta(days=n), n) for x in idas for n in duracoes
+                 if not any(not (x + timedelta(days=n) < a or x > b) for a, b in evitar)]
+        if evitar:
+            log.info("[%s] pulando viagens que encostam em %s", nome,
+                     ", ".join(f"{_br(a.isoformat())}–{_br(b.isoformat())}" for a, b in evitar))
         ult: dict = {}
         for tabela in ("verificados", "ida_volta"):
             for r in con.execute(f"SELECT ida, volta, MAX(ts) FROM {tabela} WHERE origem=? AND destino=? "
