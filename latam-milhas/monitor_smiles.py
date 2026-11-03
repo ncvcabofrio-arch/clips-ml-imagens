@@ -67,9 +67,11 @@ def main():
         mostrar("IDAS", idas)
         mostrar("VOLTAS", voltas)
         if not info.get("url"):
-            print("\nChamadas feitas pela página (últimas 25):")
-            for st, m, u in info["trafego"][-25:]:
+            proprias = [t for t in info["trafego"] if "smiles" in t[2] or "voegol" in t[2]]
+            print(f"\nChamadas da Smiles feitas pela página ({len(proprias)}):")
+            for st, m, u in proprias[-40:]:
                 print(f"  {st} {m} {u[:160]}")
+            print("\nVeja o print da tela:  open data/debug-smiles/*semresposta.png")
         return
 
     ap.print_help()
