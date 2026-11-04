@@ -69,6 +69,7 @@ def _dados(cfg: dict) -> dict:
 
     # melhores combinações (9/10/11 dias, durações, 1 parada) a partir das respostas salvas
     opcoes = {"barato": [], "meio": [], "rapido": [], "uma_parada": []}
+    trechos = {"idas": {}, "voltas": {}}
     try:
         r = calcular_combos(cfg)
 
@@ -83,6 +84,22 @@ def _dados(cfg: dict) -> dict:
             }
 
         cs = r["combos"]
+
+        def opcoes_trecho(vs):
+            """Até 3 opções por data: mais barata, mais barata com até 1 parada, mais rápida."""
+            escolhidos = {}
+            barato = min(vs, key=lambda v: (v.milhas, v.duracao_min))
+            escolhidos["barato"] = barato
+            ate1 = [v for v in vs if v.paradas <= 1]
+            if ate1:
+                escolhidos["ate1"] = min(ate1, key=lambda v: (v.milhas, v.duracao_min))
+            escolhidos["rapido"] = min(vs, key=lambda v: (v.duracao_min, v.milhas))
+            return {k: {"voo": v.voo, "hora": v.partida[11:16], "dur": v.duracao_min, "par": v.paradas,
+                        "pts": v.milhas, "taxas": round(v.taxas or 0, 2), "tarifa": v.tarifa}
+                    for k, v in escolhidos.items()}
+
+        trechos["idas"] = {k.isoformat(): opcoes_trecho(v) for k, v in sorted(r["idas"].items())}
+        trechos["voltas"] = {k.isoformat(): opcoes_trecho(v) for k, v in sorted(r["voltas"].items())}
 
         def tot(c, k):
             return c[k][0].milhas + c[k][1].milhas
@@ -106,6 +123,7 @@ def _dados(cfg: dict) -> dict:
         "janela": [ida_de.isoformat(), ida_ate.isoformat()],
         "evitar": [[a.isoformat(), b.isoformat()] for a, b in evitar],
         "por_data": por_data, "historico": historico, "pares_hist": pares_hist, "opcoes": opcoes,
+        "trechos": trechos,
     }
 
 
@@ -182,6 +200,18 @@ th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--grid
 th { color: var(--text-secondary); font-weight: 600; font-size: 12px; }
 td.num, th.num { text-align: right; }
 .ok { color: var(--good); } .no { color: var(--critical); }
+.ctrls { display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center; margin: 8px 0 12px; font-size: 13px; color: var(--text-secondary); }
+.ctrls select { font: inherit; padding: 4px 8px; border-radius: 8px; border: 1px solid var(--border); background: var(--surface-1); color: var(--text-primary); }
+.heat td.c { text-align: center; cursor: pointer; border: 2px solid var(--surface-1); border-radius: 6px; padding: 6px 4px; min-width: 64px; }
+.heat td.c:hover { outline: 2px solid var(--text-primary); }
+.heat td.c.sel { outline: 3px solid var(--text-primary); }
+.heat td.x { text-align: center; color: var(--text-muted); font-size: 11px; }
+.heat th.r { position: sticky; left: 0; background: var(--surface-1); }
+.scale { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-secondary); margin: 4px 0 8px; }
+.scale .bar { width: 160px; height: 10px; border-radius: 5px; }
+.det { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; margin-top: 12px; }
+.det .box { border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; }
+.det .big { font-size: 22px; font-weight: 650; font-variant-numeric: tabular-nums; }
 details summary { cursor: pointer; color: var(--text-secondary); font-size: 13px; margin-top: 8px; }
 </style>
 </head>
@@ -205,6 +235,22 @@ details summary { cursor: pointer; color: var(--text-secondary); font-size: 13px
     <p class="note">Cada ponto é um dia de varredura. "Melhor do dia" é a data mais barata encontrada naquele dia.</p>
     <div class="legend" id="lg2"></div>
     <div class="svgwrap" id="w2"><svg id="c2" role="img" aria-label="Evolução dos preços"></svg><div class="tip" id="t2"></div></div>
+  </section>
+
+  <section class="card">
+    <h2>Combine as datas</h2>
+    <p class="note">Com base na última varredura: o preço de cada ida e de cada volta, somados. Clique numa célula ou escolha as datas abaixo para ver os voos. Combinações fora dos 10 dias juntam ida e volta de buscas diferentes; confirme no site.</p>
+    <div class="ctrls">
+      <label>Paradas <select id="fPar"><option value="barato">Qualquer (mais barato)</option><option value="ate1">Até 1 parada</option><option value="rapido">Voo mais rápido</option></select></label>
+      <label>Dias de viagem: de <select id="fMin"></select> a <select id="fMax"></select></label>
+    </div>
+    <div class="scale"><span>mais barato</span><span class="bar" id="scaleBar"></span><span>mais caro</span><span style="margin-left:10px">· ✗ = passa do limite p/ <span class="paxn2"></span> pessoas · — = Carnaval ou sem dados</span></div>
+    <div class="tablewrap" id="heat"></div>
+    <div class="ctrls" style="margin-top:14px">
+      <label>Ida <select id="sIda"></select></label>
+      <label>Volta <select id="sVolta"></select></label>
+    </div>
+    <div id="det"></div>
   </section>
 
   <section class="card">
@@ -398,6 +444,85 @@ function chart2() {
   abas.forEach(([k, nome]) => { const b = document.createElement("button"); b.textContent = nome; b.dataset.k = k;
     b.setAttribute("role","tab"); b.onclick = () => show(k); tabs.appendChild(b); });
   show("barato");
+})();
+
+// ---------- combine as datas ----------
+(function combinar() {
+  const T = D.trechos || {idas: {}, voltas: {}};
+  const idas = Object.keys(T.idas).sort(), voltas = Object.keys(T.voltas).sort();
+  const out = document.getElementById("heat"), det = document.getElementById("det");
+  if (!idas.length) { out.innerHTML = '<p class="note">Sem dados ainda. Rode uma varredura.</p>'; return; }
+  const fPar = document.getElementById("fPar"), fMin = document.getElementById("fMin"), fMax = document.getElementById("fMax");
+  const sIda = document.getElementById("sIda"), sVolta = document.getElementById("sVolta");
+  for (let n = 5; n <= 21; n++) { fMin.add(new Option(n, n)); fMax.add(new Option(n, n)); }
+  fMin.value = 9; fMax.value = 11;
+  idas.forEach(d => sIda.add(new Option(br(d) + " (" + ["dom","seg","ter","qua","qui","sex","sáb"][new Date(d+"T12:00").getDay()] + ")", d)));
+  voltas.forEach(d => sVolta.add(new Option(br(d) + " (" + ["dom","seg","ter","qua","qui","sex","sáb"][new Date(d+"T12:00").getDay()] + ")", d)));
+  const addDays = (iso, n) => new Date(new Date(iso+"T12:00").getTime() + n*864e5).toISOString().slice(0,10);
+  const noCarnaval = (a, b) => !D.evitar.some(([x, y]) => !(b < x || a > y));
+  const pick = (opts, k) => opts ? (opts[k] || null) : null;
+  // escala sequencial (um tom de azul): claro = barato? Não: escuro = mais barato (destaque).
+  const ramp = ["#0d366b","#184f95","#256abf","#3987e5","#6da7ec","#9ec5f4","#cde2fb"];
+  document.getElementById("scaleBar").style.background = `linear-gradient(90deg, ${ramp.join(",")})`;
+  const cor = (v, lo, hi) => { const t = hi > lo ? (v-lo)/(hi-lo) : 0; return ramp[Math.min(ramp.length-1, Math.floor(t*ramp.length))]; };
+  const tinta = c => ["#0d366b","#184f95","#256abf","#3987e5"].includes(c) ? "#ffffff" : "#0b0b0b";
+  let sel = null;
+
+  function combo(ida, volta, k) {
+    const a = pick(T.idas[ida], k), b = pick(T.voltas[volta], k);
+    return a && b ? {a, b, total: a.pts + b.pts, taxas: a.taxas + b.taxas} : null;
+  }
+  function render() {
+    const k = fPar.value, lo = +fMin.value, hi = Math.max(+fMax.value, lo);
+    const dur = []; for (let n = lo; n <= hi; n++) dur.push(n);
+    const cells = [];
+    idas.forEach(i => dur.forEach(n => { const v = addDays(i, n);
+      if (noCarnaval(i, v)) { const c = combo(i, v, k); if (c) cells.push(c.total); } }));
+    const mn = Math.min(...cells), mx = Math.max(...cells);
+    let h = "<table class='heat'><thead><tr><th class='r'>Ida \\ dias</th>" + dur.map(n => `<th class=num style="text-align:center">${n}</th>`).join("") + "</tr></thead><tbody>";
+    idas.forEach(i => {
+      if (!dur.some(n => { const v = addDays(i, n); return noCarnaval(i, v) && combo(i, v, k); })) return;
+      h += `<tr><th class='r'>${br(i)}</th>`;
+      dur.forEach(n => { const v = addDays(i, n);
+        const c = noCarnaval(i, v) ? combo(i, v, k) : null;
+        if (!c) { h += `<td class="x">—</td>`; return; }
+        const bg = cor(c.total, mn, mx), over = limite && c.total > limite, isSel = sel && sel[0] === i && sel[1] === v;
+        h += `<td class="c${isSel ? " sel" : ""}" data-i="${i}" data-v="${v}" style="background:${bg};color:${tinta(bg)}" title="${br(i)} → ${br(v)}: ${fmt(c.total)} por pessoa">${fmt(c.total/1000)}k${over ? " ✗" : ""}</td>`; });
+      h += "</tr>"; });
+    out.innerHTML = h + "</tbody></table>";
+    out.querySelectorAll("td.c").forEach(td => td.onclick = () => { sel = [td.dataset.i, td.dataset.v];
+      sIda.value = sel[0]; sVolta.value = sel[1]; render(); });
+    detalhe();
+  }
+  function linhaVoo(t, rot) {
+    return `<div class="box"><div style="color:var(--text-secondary);font-size:12px">${rot}</div>
+      <div class="big">${fmt(t.pts)}</div>
+      <div>${t.voo} · ${t.par === 0 ? "direto" : t.par + " parada(s)"}</div>
+      <div style="color:var(--text-secondary)">saída ${t.hora} · ${hh(t.dur)} de viagem · ${t.tarifa} · taxas R$ ${t.taxas.toFixed(2)}</div></div>`;
+  }
+  function detalhe() {
+    const i = sIda.value, v = sVolta.value, k = fPar.value;
+    if (!i || !v) { det.innerHTML = ""; return; }
+    if (v <= i) { det.innerHTML = '<p class="note">A volta precisa ser depois da ida.</p>'; return; }
+    const dias = Math.round((new Date(v) - new Date(i)) / 864e5);
+    const c = combo(i, v, k);
+    if (!c) { det.innerHTML = `<p class="note">Sem opção ${k === "ate1" ? "com até 1 parada " : ""}salva para essas datas.</p>`; return; }
+    const tot = c.total * D.pax, ok = !D.milhas || tot <= D.milhas;
+    const aviso = noCarnaval(i, v) ? "" : ' · <span class="no">encosta no Carnaval</span>';
+    det.innerHTML = `<div class="det">
+      <div class="box"><div style="color:var(--text-secondary);font-size:12px">${br(i)} → ${br(v)} · ${dias} dias${aviso}</div>
+        <div class="big">${fmt(c.total)} <span style="font-size:13px;font-weight:400">por pessoa</span></div>
+        <div>${D.pax}x = <b>${fmt(tot)}</b> <span class="${ok ? "ok" : "no"}">${ok ? "✓ cabe" : "✗ não cabe"}</span> nas ${fmt(D.milhas)}</div>
+        <div style="color:var(--text-secondary)">taxas p/ ${D.pax}: R$ ${fmt(c.taxas * D.pax)} · ${hh(c.a.dur + c.b.dur)} de voo no total</div></div>
+      ${linhaVoo(c.a, "Ida " + br(i))}${linhaVoo(c.b, "Volta " + br(v))}</div>`;
+  }
+  [fPar, fMin, fMax].forEach(e => e.onchange = render);
+  [sIda, sVolta].forEach(e => e.onchange = () => { sel = [sIda.value, sVolta.value]; render(); });
+  // seleção inicial: a combinação mais barata (até 1 parada, se houver)
+  const melhor = (D.opcoes.uma_parada || [])[0] || (D.opcoes.barato || [])[0];
+  if (melhor && T.voltas[melhor.volta]) { sel = [melhor.ida, melhor.volta]; sIda.value = melhor.ida; sVolta.value = melhor.volta;
+    if ((D.opcoes.uma_parada || [])[0] === melhor) fPar.value = "ate1"; }
+  render();
 })();
 
 const draw = () => { chart1(); chart2(); };
