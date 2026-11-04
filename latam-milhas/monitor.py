@@ -500,7 +500,7 @@ def _horas(m) -> str:
     return f"{m // 60}h{m % 60:02d}" if m else "?"
 
 
-def melhores(cfg: dict, top: int = 12):
+def calcular_combos(cfg: dict) -> dict:
     """Monta as melhores combinações com as respostas de IDA E VOLTA já salvas
     (data/debug/RT-*-idas.json e *-voltas.json), sem acessar a LATAM.
     Combina 9/10/11 dias, evita o período configurado (ex.: Carnaval) e mostra
@@ -551,7 +551,9 @@ def melhores(cfg: dict, top: int = 12):
         rapido = min(vs, key=lambda v: (v.duracao_min, v.milhas))
         perto = [v for v in vs if v.duracao_min <= rapido.duracao_min + folga_h * 60]
         meio = min(perto, key=lambda v: (v.milhas, v.duracao_min))
-        return barato, rapido, meio
+        ate1 = [v for v in vs if v.paradas <= 1]
+        uma = min(ate1, key=lambda v: (v.milhas, v.duracao_min)) if ate1 else None
+        return barato, rapido, meio, uma
 
     combos = []
     for x, li in idas.items():
@@ -563,9 +565,24 @@ def melhores(cfg: dict, top: int = 12):
                 continue
             if (volta_ate and y > volta_ate) or (ida_de and x < ida_de):
                 continue
-            bi, ri, mi = escolhas(li)
-            bv, rv, mv = escolhas(voltas[y])
-            combos.append({"x": x, "y": y, "n": n, "barato": (bi, bv), "rapido": (ri, rv), "meio": (mi, mv)})
+            bi, ri, mi, ui = escolhas(li)
+            bv, rv, mv, uv = escolhas(voltas[y])
+            c = {"x": x, "y": y, "n": n, "barato": (bi, bv), "rapido": (ri, rv), "meio": (mi, mv)}
+            if ui and uv:
+                c["uma_parada"] = (ui, uv)
+            combos.append(c)
+
+    return {"combos": combos, "idas": idas, "voltas": voltas, "pax": pax, "milhas_tenho": milhas_tenho,
+            "duracoes": duracoes, "evitar": evitar, "volta_ate": volta_ate, "folga_h": folga_h}
+
+
+
+def melhores(cfg: dict, top: int = 12):
+    """Mostra no terminal as melhores combinações (ver calcular_combos)."""
+    r = calcular_combos(cfg)
+    combos, idas, voltas = r["combos"], r["idas"], r["voltas"]
+    pax, milhas_tenho, duracoes = r["pax"], r["milhas_tenho"], r["duracoes"]
+    evitar, volta_ate, folga_h = r["evitar"], r["volta_ate"], r["folga_h"]
 
     def linha(c, chave):
         vi, vv = c[chave]
@@ -655,6 +672,7 @@ def main():
                     help="mostra as melhores combinações com os preços já coletados (sem acessar a LATAM)")
     ap.add_argument("--comparar", nargs="+", metavar="ARG",
                     help="ORIGEM DESTINO AAAA-MM-DD N_DATAS [DIAS_VIAGEM]: compara ida-e-volta x só ida")
+    ap.add_argument("--painel", action="store_true", help="gera data/painel.html com gráficos do histórico")
     ap.add_argument("--volta-ate", metavar="AAAA-MM-DD", help="com --melhores: só voltas até essa data")
     ap.add_argument("--melhores", action="store_true",
                     help="monta as melhores combinações (9/10/11 dias, mais barato/rápido) com os dados já salvos")
@@ -679,6 +697,12 @@ def main():
             comparar(cfg, o.upper(), d.upper(), date.fromisoformat(ini), int(n), dv)
         except (PrecisaLogin, Bloqueado) as e:
             print(f"\n>>> {type(e).__name__}: {e}")
+        return
+
+    if a.painel:
+        from painel import gerar
+        caminho = gerar(cfg)
+        print(f"Painel gerado: {caminho}\nAbra com:  open {caminho}")
         return
 
     if a.melhores:
@@ -751,6 +775,11 @@ def main():
         fd = LOCK.open("x")
     try:
         varredura(cfg)
+        try:
+            from painel import gerar
+            log.info("Painel atualizado: %s", gerar(cfg))
+        except Exception as e:  # noqa: BLE001
+            log.warning("Não consegui gerar o painel: %s", e)
     except PrecisaLogin as e:
         log.error("PRECISA LOGIN: %s", e)
         telegram(cfg, "⚠️ Monitor LATAM: a sessão da LATAM Pass expirou. Faça login de novo (--login).")
