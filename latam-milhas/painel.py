@@ -435,11 +435,13 @@ function chart2() {
     tabs.querySelectorAll("button").forEach(b => b.setAttribute("aria-selected", b.dataset.k === k));
     const rows = D.opcoes[k] || [];
     if (!rows.length) { out.innerHTML = `<p class="note">${D.opcoes.erro ? "Erro: "+D.opcoes.erro : "Sem dados."}</p>`; return; }
-    out.innerHTML = "<table><thead><tr><th>Ida → volta</th><th class=num>Dias</th><th class=num>Por pessoa</th><th class=num>Para "+D.pax+"</th><th></th><th class=num>Taxas ("+D.pax+")</th><th>Ida</th><th>Volta</th></tr></thead><tbody>" +
+    out.innerHTML = "<table><thead><tr><th>Ida → volta</th><th class=num>Dias</th><th class=num>Por pessoa</th><th class=num>Para "+D.pax+"</th><th></th><th class=num>Taxas ("+D.pax+")</th><th class=num>Tempo de voo</th><th>Ida</th><th>Volta</th></tr></thead><tbody>" +
       rows.map(r => { const tot = r.total*D.pax, ok = !D.milhas || tot <= D.milhas;
         return `<tr><td>${br(r.ida)} → ${br(r.volta)}</td><td class=num>${r.dias}</td><td class=num><b>${fmt(r.total)}</b></td><td class=num>${fmt(tot)}</td>
         <td class="${ok?"ok":"no"}">${ok?"✓ cabe":"✗"}</td><td class=num>R$ ${fmt(r.taxas*D.pax)}</td>
-        <td>${r.ida_hora} · ${hh(r.ida_dur)} · ${r.ida_par}p · ${r.ida_voo}</td><td>${r.volta_hora} · ${hh(r.volta_dur)} · ${r.volta_par}p · ${r.volta_voo}</td></tr>`; }).join("") + "</tbody></table>";
+        <td class=num><b>${hh(r.ida_dur + r.volta_dur)}</b><div style="color:var(--text-muted);font-size:11px">${hh(r.ida_dur)} + ${hh(r.volta_dur)}</div></td>
+        <td>saída ${r.ida_hora} · <b>${hh(r.ida_dur)}</b> de voo · ${r.ida_par === 0 ? "direto" : r.ida_par + (r.ida_par > 1 ? " paradas" : " parada")}<div style="color:var(--text-muted);font-size:11px">${r.ida_voo}</div></td>
+        <td>saída ${r.volta_hora} · <b>${hh(r.volta_dur)}</b> de voo · ${r.volta_par === 0 ? "direto" : r.volta_par + (r.volta_par > 1 ? " paradas" : " parada")}<div style="color:var(--text-muted);font-size:11px">${r.volta_voo}</div></td></tr>`; }).join("") + "</tbody></table>";
   };
   abas.forEach(([k, nome]) => { const b = document.createElement("button"); b.textContent = nome; b.dataset.k = k;
     b.setAttribute("role","tab"); b.onclick = () => show(k); tabs.appendChild(b); });
