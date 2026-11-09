@@ -385,8 +385,8 @@ class LatamBuscador:
             esperar(lambda: len(respostas) >= 1, self.timeout_ms / 1000)
             if not respostas:
                 self._debug(f"{tag}-semresposta")
-                log.warning("Não capturei a busca de ida e volta %s", tag)
-                return [], [], info
+                # página em branco / voos que nunca carregam: outro freio disfarçado da LATAM
+                raise Bloqueado(f"a página da LATAM não carregou os voos em {self.timeout_ms // 1000}s ({tag})")
             if "bloqueio" in respostas[0]:
                 raise Bloqueado(f"API de busca respondeu {respostas[0]['bloqueio']} ({tag})")
 
