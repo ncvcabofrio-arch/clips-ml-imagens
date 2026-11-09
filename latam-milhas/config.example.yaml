@@ -43,7 +43,7 @@ max_bloqueios_seguidos: 3           # depois de 3 freios seguidos...
 pausa_longa_min: [25, 35]           # ...faz uma pausa longa (~30 min) e continua sozinho
 max_pausas_longas: 6                # até 6 pausas longas por rodada; depois disso, desiste
 pausa_bloqueio_horas: 3             # ...e só volta a buscar depois desse tempo
-timeout_busca_seg: 60
+timeout_busca_seg: 90               # internet lenta? aumente (segundos para a página carregar os voos)
 headless: false        # false = abre janela (Mac) / tela virtual xvfb (VPS)
 proxy: ""              # opcional: "http://usuario:senha@host:porta"
 

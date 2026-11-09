@@ -31,6 +31,7 @@ LOCK = RAIZ / "data" / "monitor.lock"
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
+    datefmt="%H:%M:%S",
     handlers=[logging.StreamHandler(), logging.FileHandler(RAIZ / "data" / "monitor.log")],
 )
 log = logging.getLogger("monitor")
@@ -249,9 +250,17 @@ def varrer_viagem(b: LatamBuscador, con, cfg: dict, vg: dict, pausa) -> int:
         pausas_longas = 0
         fila = list(pendentes[:limite_buscas])
         parar = False
+        total_rodada = len(fila)
+        inicio_rodada = time.time()
         while fila and not parar:
             x, y, n = fila[0]
             pausa()
+            feitas = total_rodada - len(fila)
+            resto = ""
+            if feitas:
+                seg = (time.time() - inicio_rodada) / feitas * len(fila)
+                resto = f" · faltam ~{seg / 60:.0f} min"
+            log.info("[%d/%d] %s → %s%s", feitas + 1, total_rodada, _br(x.isoformat()), _br(y.isoformat()), resto)
             try:
                 lista_i, lista_v, info = b.buscar_ida_volta(o, d, x, y, _cabine_url(cabine), adultos, filtro=filtro)
                 freios, erros = 0, 0
