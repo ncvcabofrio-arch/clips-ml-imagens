@@ -243,6 +243,9 @@ def varrer_viagem(b: LatamBuscador, con, cfg: dict, vg: dict, pausa) -> int:
         max_freios = int(cfg.get("max_bloqueios_seguidos", 3))
         espera_freio = cfg.get("espera_apos_bloqueio_min", [3.5, 4.5])
         freios, erros = 0, 0
+        pausa_longa = cfg.get("pausa_longa_min", [25, 35])
+        max_pausas_longas = int(cfg.get("max_pausas_longas", 6))
+        pausas_longas = 0
         fila = list(pendentes[:limite_buscas])
         parar = False
         while fila and not parar:
@@ -254,8 +257,16 @@ def varrer_viagem(b: LatamBuscador, con, cfg: dict, vg: dict, pausa) -> int:
             except Bloqueado as e:
                 freios += 1
                 if freios >= max_freios:
-                    log.error("BLOQUEADO %d vezes seguidas (%s) — pausando por %s h", freios, e,
-                              cfg.get("pausa_bloqueio_horas", 3))
+                    if pausas_longas < max_pausas_longas:
+                        pausas_longas += 1
+                        minutos = random.uniform(*pausa_longa)
+                        log.warning("LATAM bloqueou %d vezes seguidas. Pausa longa de %.0f min e continuo sozinho "
+                                    "(%d/%d). Pode deixar rodando.", freios, minutos, pausas_longas, max_pausas_longas)
+                        time.sleep(minutos * 60)
+                        freios = 0
+                        continue  # tenta a mesma data de novo
+                    log.error("BLOQUEADO %d vezes seguidas (%s), já com %d pausas longas — pausando por %s h",
+                              freios, e, pausas_longas, cfg.get("pausa_bloqueio_horas", 3))
                     pausar_por_bloqueio(cfg)
                     telegram(cfg, f"⚠️ LATAM bloqueou {freios}x seguidas. Pausando {cfg.get('pausa_bloqueio_horas', 3)} h.")
                     break
@@ -276,6 +287,10 @@ def varrer_viagem(b: LatamBuscador, con, cfg: dict, vg: dict, pausa) -> int:
                     parar = True
                 continue
             fila.pop(0)
+            if info.get("metodo") == "api" and not lista_v:
+                log.warning("  %s → %s: o clique na ida falhou e o plano B não trouxe voltas; "
+                            "fica para a próxima rodada", x, y)
+                continue
             con.execute("INSERT INTO verificados VALUES (?,?,?,?,?)",
                         (o, d, x.isoformat(), y.isoformat(), datetime.now().isoformat(timespec="seconds")))
             con.commit()

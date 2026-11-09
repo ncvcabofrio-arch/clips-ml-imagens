@@ -39,7 +39,9 @@ max_buscas_por_rodada: 10           # cada execução busca no máx. isso; a pr�
 revalidar_horas: 20                 # um par de datas só é buscado de novo depois disso
 validade_preco_horas: 72            # preços mais velhos que isso não entram no ranking
 espera_apos_bloqueio_min: [3.5, 4.5]  # freio da LATAM (403): espera ~4 min e tenta a mesma data de novo
-max_bloqueios_seguidos: 3           # depois de 3 freios seguidos, desiste da rodada
+max_bloqueios_seguidos: 3           # depois de 3 freios seguidos...
+pausa_longa_min: [25, 35]           # ...faz uma pausa longa (~30 min) e continua sozinho
+max_pausas_longas: 6                # até 6 pausas longas por rodada; depois disso, desiste
 pausa_bloqueio_horas: 3             # ...e só volta a buscar depois desse tempo
 timeout_busca_seg: 60
 headless: false        # false = abre janela (Mac) / tela virtual xvfb (VPS)
