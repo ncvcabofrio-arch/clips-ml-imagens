@@ -369,6 +369,9 @@ class LatamBuscador:
             while not cond() and time.time() < fim:
                 if "auth.latamairlines.com" in self.page.url or "/login" in self.page.url:
                     raise PrecisaLogin("A LATAM pediu login. Rode:  .venv/bin/python monitor.py --login")
+                if "/erro/" in self.page.url:
+                    # página "A busca está demorando mais que o normal": é um freio disfarçado
+                    raise Bloqueado(f"LATAM mostrou a página de erro da busca ({tag})")
                 self.page.wait_for_timeout(500)
             return cond()
 

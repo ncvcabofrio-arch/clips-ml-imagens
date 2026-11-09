@@ -291,6 +291,9 @@ def varrer_viagem(b: LatamBuscador, con, cfg: dict, vg: dict, pausa) -> int:
                     raise RuntimeError("3 erros seguidos")  # reabre o navegador e continua
                 continue
             fila.pop(0)
+            if not info.get("url_idas"):
+                log.warning("  %s → %s: a página não trouxe os voos; fica para a próxima rodada", x, y)
+                continue
             if info.get("metodo") == "api" and not lista_v:
                 log.warning("  %s → %s: o clique na ida falhou e o plano B não trouxe voltas; "
                             "fica para a próxima rodada", x, y)
