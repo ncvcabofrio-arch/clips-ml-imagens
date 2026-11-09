@@ -243,6 +243,7 @@ def varrer_viagem(b: LatamBuscador, con, cfg: dict, vg: dict, pausa) -> int:
         max_freios = int(cfg.get("max_bloqueios_seguidos", 3))
         espera_freio = cfg.get("espera_apos_bloqueio_min", [3.5, 4.5])
         freios, erros = 0, 0
+        parar = False
         pausa_longa = cfg.get("pausa_longa_min", [25, 35])
         max_pausas_longas = int(cfg.get("max_pausas_longas", 6))
         pausas_longas = 0
@@ -278,13 +279,16 @@ def varrer_viagem(b: LatamBuscador, con, cfg: dict, vg: dict, pausa) -> int:
             except PrecisaLogin:
                 raise
             except Exception as e:  # noqa: BLE001  (rede, página que não carregou, etc.)
+                msg = str(e)
+                if any(t in msg for t in ("Connection closed", "Target page, context or browser has been closed",
+                                          "Browser has been closed", "has been closed")):
+                    raise  # navegador morreu: sobe para reabrir e continuar
                 erros += 1
                 log.error("Erro inesperado em %s → %s: %s: %s", x, y, type(e).__name__,
                           str(e).splitlines()[0][:200] if str(e) else "")
                 fila.pop(0)
                 if erros >= 3:
-                    log.error("3 erros seguidos — encerrando a rodada (rode de novo depois)")
-                    parar = True
+                    raise RuntimeError("3 erros seguidos")  # reabre o navegador e continua
                 continue
             fila.pop(0)
             if info.get("metodo") == "api" and not lista_v:
@@ -789,7 +793,23 @@ def main():
         LOCK.unlink()
         fd = LOCK.open("x")
     try:
-        varredura(cfg)
+        tentativas = 0
+        while True:
+            try:
+                varredura(cfg)
+                break
+            except (PrecisaLogin, Bloqueado, KeyboardInterrupt):
+                raise
+            except Exception as e:  # noqa: BLE001  (navegador fechou, rede caiu...)
+                tentativas += 1
+                if tentativas > 3:
+                    raise
+                log.warning("O navegador do robô caiu (%s: %s). Abrindo de novo em 1 min e continuando "
+                            "de onde parou (%d/3).", type(e).__name__, str(e).splitlines()[0][:120] if str(e) else "",
+                            tentativas)
+                time.sleep(60)
+                if float(cfg.get("revalidar_horas", 20)) < 1:
+                    cfg["revalidar_horas"] = 12  # não refazer o que já foi buscado nesta rodada
         try:
             from painel import gerar
             log.info("Painel atualizado: %s", gerar(cfg))

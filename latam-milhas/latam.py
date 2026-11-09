@@ -254,10 +254,15 @@ class LatamBuscador:
         return self
 
     def __exit__(self, *a):
+        # se o navegador já caiu, fechar dá erro: ignora para não esconder o erro original
         try:
             self.ctx and self.ctx.close()
-        finally:
+        except Exception:  # noqa: BLE001
+            pass
+        try:
             self._pw and self._pw.stop()
+        except Exception:  # noqa: BLE001
+            pass
 
     def _aquecer(self):
         """Abre a home primeiro, como um humano, para ganhar cookies."""
