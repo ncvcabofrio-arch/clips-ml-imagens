@@ -7,7 +7,7 @@ viagens:
     origem: GIG
     destino: MCO
     ida_de: 2027-01-15         # primeiro dia possível de ida
-    ida_ate: 2027-03-05        # último dia de ida (volta até 15/03)
+    ida_ate: 2027-03-10        # último dia de ida (volta até 20/03)
     dias_de_viagem: [10]       # ex.: [9, 10, 11] testa 3x mais buscas
     modo: ida_e_volta          # ida_e_volta (busca RT) | separado (cada trecho como só ida)
     cabine: economica          # economica | executiva | qualquer
@@ -31,6 +31,7 @@ passageiros: 4
 melhores_dias: [9, 10, 11]
 evitar_periodos:                    # viagens que encostem nesses dias são descartadas
   - [2027-02-05, 2027-02-10]        # Carnaval 2027 (sexta 05/02 a Quarta de Cinzas 10/02)
+  - [2027-03-02, 2027-03-05]        # evento (a viagem não pode passar por esses dias)
 folga_horas_rapido: 2               # "meio-termo": até 2h a mais que o voo mais rápido do dia
 
 # Comportamento do robô (seja gentil para não ser bloqueado)
